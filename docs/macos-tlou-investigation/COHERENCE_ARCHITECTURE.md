@@ -2,7 +2,9 @@
 
 This document records the architecture-level performance direction selected
 after the 2026-08-08 bedroom capture. It is a hypothesis with explicit causal
-gates, not a promise that the base M3 will reach 30 FPS.
+gates, not a promise that the base M3 will reach 30 FPS. The first live oracle
+result is preserved in
+[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md).
 
 ## Why this is the leading CPU-side target
 
@@ -57,10 +59,12 @@ The important existing paths are:
 
 Commit `5670a849f` preserves the exact-MFC-timer arm. Commit `18092fc7c`
 removes that 3.57-million-calls/s timer and retains the lower-rate ledger plus a
-single relaxed enable check on each executed MFC transfer. The next capture
-must compare otherwise identical overlay-on and overlay-off windows. Reject or
-redesign the observer if throughput changes by more than 3--5%, pacing changes
-materially, or faults per frame move by more than about 3%.
+single relaxed enable check on each executed MFC transfer. The first live
+capture exercised the observer but did not include an adjacent overlay-off
+control. Oracle v2 must compare otherwise identical overlay-on and overlay-off
+windows. Reject or redesign the observer if throughput changes by more than
+3--5%, pacing changes materially, or faults per frame move by more than about
+3%.
 
 ## Phase 1: fault-side causal ring
 
@@ -100,6 +104,39 @@ added to the outer fault/MFC time.
 Implementation work proceeds only if a small stable set of ranges/pages
 explains at least 80% of readback wait or a dry-run policy predicts at least
 5 ms/frame of non-overlapping critical-path savings.
+
+### First live result and oracle v2
+
+The `f35963bea` bedroom interval delivered 1,310 frames in 69.8359 seconds
+(18.758 FPS). The aggregate ring had zero drops and recorded exactly one PPU
+fault, three readback-bearing faults, four fault-attached readbacks, and six
+global readbacks per frame. Fault records captured 99.98% of cumulative
+GPU/readback wait time. One-second pacing degradation also tracked flush-wait
+time per frame (`r = 0.75`). This preserves coherence as an architecture-scale
+lead; it does not turn inclusive wait totals into recoverable frame time.
+
+Oracle v1 failed its exact-attribution gates. Every one-second signature table
+saturated, excluding 23.21% of events from signature aggregation. Exact MFC
+context covered only 25.42% of SPU faults and contained PUTs but no GETs.
+One-third of section-bearing faults selected multiple sections, overflowing
+the one retained record; the corresponding `readback_outside_locked` results
+are a validation artifact, not proof of genuine range escape.
+
+Commit `e0be35322` implements oracle v2 as a behavior-preserving, bounded
+diagnostic:
+
+- use a bounded exact semantic-site key that excludes moving addresses and IDs,
+  with an explicit untracked-site gate instead of silently dropping new sites;
+- emit origin identity and make GET/read context explicit, including raw-SPU
+  proxy transfers;
+- retain a small fixed array of selected sections with per-section relation
+  evidence instead of collapsing a common two-section case; and
+- pair each retained readback with its corresponding section and validate that
+  operation against that section's locked range.
+
+Require zero aggregate-ring loss, zero untracked semantic sites, at least 95%
+containing MFC context on SPU handled faults, and no unexplained section or
+offloader cases before using site shares to select a policy.
 
 ## Phase 2: logical coherence directory and exact access ticket
 
@@ -161,14 +198,31 @@ synchronization bound rather than an implementation accident.
 ## Deterministic PPU fault
 
 The one-per-frame PPU fault is independently valuable: removing its measured
-11.35 ms critical stall would move 17.76 FPS toward roughly 22 FPS if the time
-is fully serialized. Aggregate it by address and guest PC in the first oracle.
+11.35 ms in the clean ledger, or 14.79 ms in the instrumented oracle interval,
+would be material if the time is fully serialized. The differing observations
+are not interchangeable absolute benchmarks, and neither is a guaranteed
+saving. Aggregate it by semantic access and ownership state as well as address
+and guest PC in oracle v2.
 
 If it is a stable report/ZCULL/texture read, schedule readback at the producer's
 known RSX synchronization point rather than waiting for the consumer fault. If
 it is only another-lane collision, the existing ARM64 memory decoder may allow
 a supported scalar load/store to use the sudo alias while preserving sibling
 protection; SIMD, pair, and ambiguous operations retain the old fault path.
+
+## Production generalization rule
+
+The steady bedroom is a repeatable microscope for data collection, not the
+specification for an optimization. Addresses, guest or host PCs, observed
+section identities, frame cadence, and signature ranks may select diagnostic
+groups but may never select production behavior. Production decisions must be
+derived from semantic inputs: exact requested range, access direction,
+ownership and generation, synchronization state, and MFC tag/barrier ordering.
+
+A candidate must preserve correctness in multiple TLoU scenes with different
+Cell/RSX traffic and improve thermally conditioned overlay-off A/B windows
+before it can be generalized. If a rule works only for the bedroom's stable
+addresses or cadence, discard it rather than hard-code it.
 
 ## Correctness risks
 
@@ -189,13 +243,16 @@ if time merely moves from faults into channel, MFC, or GPU waits.
 
 ## Performance decision gate
 
-The measured frame time is about 56.3 ms; 30 FPS requires 33.3 ms, a reduction
-of roughly 23 ms. The deterministic PPU fault provides at most about 11 ms of
-obvious serialized opportunity. Reaching 30 therefore also requires hiding or
-removing another 11--12 ms from SPU/RSX coherence and, depending on scene,
-additional guest compute improvements. In the later, nonstationary 14-FPS
-sample, main-PPU guest execution alone occupied roughly 46 ms/frame; that is
-not a clean critical-path measurement, but it rules out treating coherence as
-the entire problem. A plausible route is now visible, but 30 FPS is not
-established until a correct branch reaches at most 40 ms/frame with a
-separately measured remaining cost.
+The clean ledger measured about 56.3 ms/frame and the later oracle interval
+about 53.3 ms/frame; 30 FPS requires 33.3 ms, so roughly 20--23 ms must be
+removed from the critical path. The one-per-frame PPU fault is a material lead,
+and oracle-v1 attached nearly all expensive readback wait to handled faults,
+but those timers overlap across nested and parallel actors. They do not prove a
+20 ms saving. Reaching 30 likely also requires hiding or removing SPU/RSX
+coherence work and, depending on scene, additional guest-compute improvements.
+In the later, nonstationary 14-FPS sample, main-PPU guest execution alone
+occupied roughly 46 ms/frame; that is not a clean critical-path measurement,
+but it rules out treating coherence as the entire problem. A plausible route
+remains visible, but 30 FPS is not established until a correct semantic branch
+reaches at most 40 ms/frame with a separately measured remaining cost and then
+survives cross-scene validation.

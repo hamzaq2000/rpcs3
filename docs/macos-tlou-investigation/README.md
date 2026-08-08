@@ -22,7 +22,9 @@ but ineffective ideas; see
 [`EXPERIMENTS.md`](EXPERIMENTS.md) for the result ledger and
 [`STATE.md`](STATE.md) for the detailed current model and safety notes. The
 selected architecture and its correctness gates are in
-[`COHERENCE_ARCHITECTURE.md`](COHERENCE_ARCHITECTURE.md).
+[`COHERENCE_ARCHITECTURE.md`](COHERENCE_ARCHITECTURE.md). The first live
+fault-oracle capture and its exact validity boundary are recorded in
+[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md).
 
 Important measurement rules:
 
@@ -35,18 +37,26 @@ Important measurement rules:
   title-bar FPS is a short-window, latched value.
 - Condition or record thermal state. This is a fanless machine, and a recent
   link can halve observed throughput.
-- Require warm compiler caches and reject windows containing SPU/RSX builds or
-  `RsxKick` recovery.
+- Prefer warm compiler caches and record SPU/RSX builds, audio changes, and
+  `RsxKick` recovery. Exclude the affected interval or reject the run only when
+  the event is recurrent, material, or explains the result; one isolated tiny
+  event does not invalidate a long stable window.
 
 The performance target is 30 FPS, but it is treated as a hypothesis to falsify,
-not as an assumed outcome. The causal ledger now shows that the bedroom issues
-roughly 224 confirmed Cell-to-RSX coherence faults and 107 synchronous GPU
-readback waits per second while transferring only about 34 MB/s back to the
-CPU. The next architecture experiment therefore targets the handoff and
-coherence protocol—not another arithmetic instruction or smaller raw copies.
-Commit `18092fc7c` adds a bounded fault-side causal ring that records exact SPU
-MFC ranges, fault identity, selected texture-section ranges, and the nested
-flush/readback intervals without changing emulation behavior. The next live
-capture must distinguish genuine logical overlap from macOS 16 KiB host-page
-false sharing and identify read/GET versus overwrite/PUT semantics. Only then
-should exact-range SPU MFC preflight and batching be implemented.
+not as an assumed outcome. The causal ledger shows that the bedroom issues
+hundreds of Cell-to-RSX coherence faults and roughly six synchronous GPU
+readbacks per frame while transferring only about 34--36 MB/s back to the CPU.
+The first `f35963bea` fault-oracle capture measured 18.758 FPS and attached
+99.98% of readback-wait time to handled faults, preserving the coherence path
+as an architecture-scale lead. It also exposed observer defects: signature
+overflow, only 25.42% exact MFC coverage, no GET context, and one multi-section
+overflow per frame. Commit `e0be35322` implements oracle v2's signal-visible
+GET context, exact semantic-site table, and paired two-section observations.
+Live validation of those gates remains required before any production policy
+is selected.
+
+The bedroom is a controlled microscope, not the optimization specification.
+Production decisions must be semantic—exact range, direction, ownership,
+generation, and ordering—never hard-coded guest addresses, PCs, or observed
+bedroom signatures. A promising rule must pass cross-scene correctness and
+performance validation before it can support a general performance claim.

@@ -47,24 +47,29 @@ effective log configuration rather than only the intended YAML values.
 | CELLSTAT diagnostic validation | Signal-safe handled-fault timers, RSX handoff/readback counters, and sharded SPU channel/MFC timers passed Release+ThinLTO compilation and all 188 enabled tests; 128-byte isolation matches the M3 cache line | Safe enough for a bounded causal capture; counters are cumulative and inclusive, so use deltas and never add nested times |
 | Clean Cell/RSX coherence ledger | 58.716 s, 1,043 presents (17.76 FPS), no compilation/timeouts. Confirmed 1,043 PPU + 12,086 SPU renderer faults; 10,002 flush producer waits; 6,258 GPU readback waits averaging 2.22 ms; only 2.018 GB read back (~34.4 MB/s) | Synchronization latency and handoff frequency dominate the readback chain, not raw transfer bandwidth. Fault-side exact-range attribution is now the leading CPU-side experiment |
 | Matching feedback workload during CELLSTAT | ~163.47 requests, 154.47 copies, 58 new snapshots, 96.47 refreshes, 9 generation reuses, and ~702.6 MiB logical copied per frame; every one of 101,198 dirty candidates was full coverage | Confirms the snapshot-reuse, cross-frame, and dirty-region branches remain exhausted; the coherence result is not caused by a changed renderer workload |
-| Fault-attribution oracle checkpoint | Removed the 3.57-million/s MFC timer; added a 4,096-entry signal-safe fault ring, exact DMA/list/atomic MFC context, locked texture-section range classification, nested wait/readback attribution, and compact one-second summaries. Release+ThinLTO `rpcs3_emu` built and all 195 enabled tests passed | Ready for a behavior-neutral causal capture. Reject intervals with material drops, signature/section overflow, readback mismatch, missing MFC context, or offloader attribution; compare overlay on/off for observer cost |
+| Fault-attribution oracle v1 checkpoint | Removed the 3.57-million/s MFC timer; added a 4,096-entry signal-safe fault ring, exact DMA/list/atomic MFC context, locked texture-section range classification, nested wait/readback attribution, and compact one-second summaries. Release+ThinLTO `rpcs3_emu` built and all 195 enabled tests passed | Ready for a behavior-neutral causal capture. Reject intervals with material drops, signature/section overflow, readback mismatch, missing MFC context, or offloader attribution; compare overlay on/off for observer cost |
+| First live fault-oracle capture (`f35963bea`) | 1,310 complete-bucket frames in 69.836 s: 18.758 FPS, p95 62.46 ms, maximum 107.54 ms. Zero ring drops; one PPU fault/frame, 11.77 SPU faults/frame, four fault-attached of six global readbacks/frame, and 99.98% of global readback-wait time attached. Signature overflow excluded 23.21% of events, MFC context covered only 25.42% of SPU faults with no GETs, and one multi-section event overflowed per frame | Aggregate scale keeps Cell/RSX coherence viable, but exact TOP/range percentages fail the oracle's own gates. Repair semantic aggregation, GET/raw-SPU attribution, and bounded multi-section capture before selecting policy. The bedroom is a microscope; production rules must be semantic and cross-scene validated |
+| Fault-attribution oracle v2 (`e0be35322`) | Added compiler signal fences so optimized list GETs retain asynchronous fault context; semantic 128-site aggregation; explicit normal/list/atomic/raw-proxy source; two ordinal-paired section/readback records; per-operation range validation; SPU-origin coverage gates; and exact untracked/overflow/pairing counters. Release+ThinLTO app linked and all 198 enabled tests passed | Behavior remains unchanged. Live validation, including an overlay-off observer control, is now the blocker before selecting a coherence policy |
 
 ## Next experiments
 
-1. Run the new fault-oracle build in the steady bedroom and validate its own
-   integrity gates: zero drops and signature overflow, immaterial
-   multi-section/offloader cases, readback-count agreement, and at least 95%
-   exact MFC-context coverage for SPU faults. Compare an otherwise-identical
-   overlay-off window and reject more than 3--5% observer slowdown.
-2. Group the deterministic PPU fault and SPU MFC faults by exact address/range,
-   direction, command class, selected section, and wait/readback cost. Continue
-   only if stable keys explain at least 80% of readback wait or predict at
-   least 5 ms/frame of critical-path savings.
-3. If the oracle shows material SPU false sharing or repeated exact-range slow
-   paths, prototype an atomic native-page ownership/version preflight in MFC.
-   The common path must remain a few local loads: 3.57 million MFC submissions
-   per second cannot unconditionally call into RSX. Batch/coalesce only the
-   roughly 206-per-second slow path while preserving all current fallbacks.
+1. Validate oracle v2 in the steady bedroom and require zero ring/site loss, no
+   unexplained section overflow or mismatch, and at least 95% containing MFC
+   context on SPU handled faults. Run an otherwise-identical overlay-off control
+   and reject more than 3--5% observer slowdown or material pacing/fault-rate
+   change.
+2. Group deterministic faults by semantic inputs—exact range, direction,
+   ownership/generation, command class, and selected sections—and continue only
+   if they explain at least 80% of readback wait or predict at least 5 ms/frame
+   of non-overlapping critical-path savings. Never promote a guest address, PC,
+   or bedroom signature into a production rule; repeat any candidate in
+   distinct scenes before generalizing it.
+3. If the valid oracle shows material SPU false sharing or repeated exact-range
+   slow paths, prototype an atomic native-page ownership/version preflight in
+   MFC. The common path must remain a few local loads: 3.57 million MFC
+   submissions per second cannot unconditionally call into RSX. Batch/coalesce
+   only the roughly 206-per-second slow path while preserving all current
+   fallbacks.
 4. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing

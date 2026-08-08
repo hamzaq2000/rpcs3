@@ -277,19 +277,47 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     are zero or immaterial. Because the hot path still performs one relaxed
     enable load per executed MFC transfer, a debug-on/off observer A/B remains
     mandatory before using its absolute FPS.
+33. The first live oracle interval at `f35963bea` is preserved and fully
+    reported in `FAULT_ORACLE_CAPTURE_F35963BE.md`. Its 68 complete buckets
+    contain 1,310 frames in 69.8359 seconds (18.758 FPS, p95 62.46 ms, maximum
+    107.54 ms), 1,310 PPU and 15,419 SPU handled faults, and zero ring drops.
+    The scene issued exactly six global readbacks per frame; four were attached
+    to handled faults, yet those four captured 99.98% of global readback-wait
+    time. This keeps coherence/flush serialization viable at architecture
+    scale. Exact attribution is not ready: the first-64 signature table
+    excluded 23.21% of events, MFC context covered only 25.42% of SPU faults
+    and no GETs, and one multi-section case overflowed per frame. The bedroom
+    remains a controlled microscope. Production behavior must use semantic
+    range, direction, ownership/generation, and ordering evidence and must pass
+    cross-scene validation; observed addresses, PCs, and cadence are never
+    production rules.
+34. Commit `e0be35322` implements oracle v2 without changing emulation policy.
+    Compiler signal fences retain list-GET TLS context through asynchronous
+    access violations without emitting a hardware fence. Events identify
+    normal DMA, optimized list, atomic, and raw-SPU-proxy sources; retain two
+    ordinal-paired section/readback observations; validate each operation
+    against its own locked range; and aggregate an exact 128-entry semantic-site
+    table without keying on moving addresses or origin IDs. Separate
+    `spu_mfc_valid`, `spu_mfc_missing`, and `spu_mfc_fault_miss` counters make
+    the 95% SPU-origin gate unambiguous. The bounded ring is 2 MiB.
+    Release+ThinLTO linked successfully and all 198 enabled tests passed; two
+    existing tests remain disabled. The preserved app binary has SHA-256
+    `91fc7261878e31cca83c9325c10b61874845e4f207bbf4879ff22af874c76cc9`.
+    Live validation is still pending.
 
 ## Current blocker
 
-The fault-side causal ring is implemented and verified; the current blocker is
-the first clean live attribution capture. It must classify each 16 KiB
-native-page fault as a true logical overlap, another-4-KiB-lane/padding false
-share, or an unknown/chain-only selection, and show whether a small stable set
-of keys explains at least 80% of readback wait or predicts at least 5 ms/frame
-of critical-path savings. Only then implement a fast atomic page-state
-preflight and batched slow path in MFC. Direct PPU JIT accesses still rely on
-host protection and cannot simply be converted to a 4 KiB software version
-table on macOS. Keep official 1280x720/100% settings and treat the removed
-historical WCB/WDB patch only as a canary.
+Oracle v2 is implemented; the current blocker is live validation. Repeat the
+bedroom with an adjacent overlay-off observer control and require zero ring or
+untracked-site loss, at least 95% containing SPU-origin MFC coverage, no
+unexplained section overflow/pairing failure, and no material observer cost.
+Only if a semantic class explains at least 80% of readback wait or predicts at
+least 5 ms/frame of non-overlapping critical-path
+savings should an exact-access ticket or batched slow path be implemented.
+Direct PPU JIT accesses still rely on host protection and cannot simply be
+converted to a 4 KiB software version table on macOS. Keep official
+1280x720/100% settings and treat the removed historical WCB/WDB patch only as a
+canary.
 
 ## Current source work
 
@@ -313,9 +341,17 @@ historical WCB/WDB patch only as a canary.
   execution context, signal-safe fault capture, locked texture-section range
   classification, and compact `CELLFAULT_SUM`/`CELLFAULT_TOP` output. It also
   removes the perturbative exact-MFC timer from the capture build.
+- Oracle-v2 attribution repair in `e0be35322`, including signal-visible list
+  context, semantic exact-site aggregation, raw-proxy source identity, paired
+  two-section observations, and origin-clean coverage gates.
+- Preserved `f35963bea` live-capture report and artifact identity in
+  `FAULT_ORACLE_CAPTURE_F35963BE.md`; the report separates trustworthy
+  aggregate evidence from the oracle-v1 attribution failures and records the
+  oracle-v2 and cross-scene gates.
 
-All 195 enabled tests passed after the fault-oracle changes; two tests remain
-disabled in the existing suite.
+All 198 enabled tests pass after oracle v2; two tests remain disabled in the
+existing suite. The 195-test result above belongs to the historical v1
+checkpoint.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
@@ -334,6 +370,21 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   `/Users/hamza/Documents/rpcs3-repro/artifacts/cellstat-2026-08-08/rpcs3-cellstat-bedroom-d46e343.sample.txt` (SHA-256
   `0d5655cf330555b7dd4434565bf2c0af9dc0c3e4a7ea4e3a8dbdb70c4f76fcf0`).
   The exact 60-second log byte interval is `12120418..12981849`.
+- The first fault-oracle capture is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/cellfault-2026-08-08-f35963be`.
+  Its manifest SHA-256 is
+  `c29b1e314e824bc917291016919e3a0fbfe6c50dc4bf3a94a149832d8e96d422`,
+  full `RPCS3.log` SHA-256 is
+  `065cb3beb69482b23c165211fb84a1064681fd740c5617faa8d8c5a131958ffd`,
+  stack-sample SHA-256 is
+  `4539faedf9906ae520bba1aa5e85b0dc8f457059832d20f5bcd11c06c659cf6d`,
+  and exact analyzed byte interval is `[12205127, 14023723)`. The sample was
+  taken after the interval and must remain separate from its timing.
+- The oracle-v2 Release+ThinLTO app is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-e0be3532-fault-oracle-v2.app`.
+  Its executable SHA-256 is
+  `91fc7261878e31cca83c9325c10b61874845e4f207bbf4879ff22af874c76cc9`,
+  and its embedded build identity is `19709-e0be3532`.
 - The final renderer profile is
   `home-release-lto-feedback-copy-edge`; it ran windowed with Strict Off,
   `Force Framebuffer Feedback Copies` On, and the Release+ThinLTO binary.
