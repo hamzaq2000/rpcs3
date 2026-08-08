@@ -14,12 +14,15 @@ The work has produced two separately preserved fixes:
   flickering black squares seen through MoltenVK without enabling all of Strict
   Rendering Mode, but it remains expensive in gameplay.
 
-Current uncommitted/experimental work investigates performance rather than
-boot correctness. It includes snapshot-reuse telemetry, write-generation and
-dirty-region oracles, and macOS scheduler experiments. These diagnostics have
-already ruled out several attractive but ineffective ideas; see
+Current experimental work investigates performance rather than boot
+correctness. It includes snapshot-reuse telemetry, write-generation and
+dirty-region oracles, macOS scheduler experiments, and a causal Cell/RSX
+coherence ledger. These diagnostics have already ruled out several attractive
+but ineffective ideas; see
 [`EXPERIMENTS.md`](EXPERIMENTS.md) for the result ledger and
-[`STATE.md`](STATE.md) for the detailed current model and safety notes.
+[`STATE.md`](STATE.md) for the detailed current model and safety notes. The
+selected architecture and its correctness gates are in
+[`COHERENCE_ARCHITECTURE.md`](COHERENCE_ARCHITECTURE.md).
 
 Important measurement rules:
 
@@ -36,8 +39,12 @@ Important measurement rules:
   `RsxKick` recovery.
 
 The performance target is 30 FPS, but it is treated as a hypothesis to falsify,
-not as an assumed outcome. The next architecture-level work is a causal ledger
-for PPU/SPU channel and reservation waits, MFC/VM faults, RSX flush latency,
-GPU readback waits, and transferred bytes. That evidence should decide whether
-the next implementation belongs in Cell scheduling, 16 KiB host-page
-coherence, or the RSX/MoltenVK feedback path.
+not as an assumed outcome. The causal ledger now shows that the bedroom issues
+roughly 224 confirmed Cell-to-RSX coherence faults and 107 synchronous GPU
+readback waits per second while transferring only about 34 MB/s back to the
+CPU. The next architecture experiment therefore targets the handoff and
+coherence protocol—not another arithmetic instruction or smaller raw copies.
+A fault-side causal ring must first distinguish genuine logical overlap from
+macOS 16 KiB host-page false sharing and identify read/GET versus overwrite/PUT
+semantics. Only then should exact-range SPU MFC preflight and batching be
+implemented.

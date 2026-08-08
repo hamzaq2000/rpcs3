@@ -202,24 +202,81 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
    workers were idle. This validates an architecture-first target: reduce Cell
    scheduling and PPU/SPU <-> RSX coherence serialization, rather than looking
    for more compilation or isolated instruction wins.
+27. A causal Cell/RSX ledger was added behind the existing debug-overlay gate
+   and validated with the full test suite. It distinguishes confirmed
+   renderer-handled PPU/SPU faults from rejected Vulkan probes, times the RSX
+   flush-queue handoff and GPU-event readback wait, records actual readback
+   bytes, and measures inclusive SPU channel/event slow paths and MFC command
+   submission paths. The hot MFC counters use 64 independent 128-byte shards
+   because this M3 reports 128-byte cache lines. Manual SPU stack escapes finish
+   their active timer explicitly, and the signal-handler path remains lock-free
+   and allocation-free. These are lifetime-cumulative, inclusive counters: they
+   must be differenced over a window and never summed as independent wall time.
+28. The clean CELLSTAT-differenced bedroom window lasted 58.716 seconds and
+   contained 1,043 validated package-0x202 presents (17.76 FPS, p50 55.4 ms,
+   p95 62.9 ms, maximum 82.3 ms), with no SPU/RSX compilation, `RsxKick` timeout, audio
+   switch, or device loss. It recorded 1,043 confirmed PPU and 12,086 confirmed
+   SPU renderer faults: 223.6 handled Cell-to-RSX faults per second, 92.1% of
+   them originating on SPUs. The Vulkan handler saw 16,188 probes, of which
+   3,059 (18.9%) were rejected. There were 10,002 RSX producer waits
+   (170.3/s, 1.63 ms average) and 6,258 GPU readback waits (106.6/s, 2.22 ms
+   average), but only 2,018,113,216 readback bytes, about 34.4 MB/s. The event
+   and readback timers currently wrap the same single wait and therefore are an
+   integrity check, not additive costs.
+29. Normalized per frame, the chain is unusually deterministic: exactly one
+   confirmed PPU renderer fault averaging 11.35 ms, 11.59 SPU faults, exactly
+   six GPU readbacks totaling 1,934,912 bytes, 9.59 flush-queue waits, and
+   164.69 SPU channel/event slow paths. The inclusive times overlap across
+   parallel actors, but the fixed cadence gives the next fault-side ring a
+   strong attribution target. The current telemetry cannot yet identify which
+   addresses dominate, associate individual readbacks with PPU versus SPU
+   faults, or distinguish an MFC GET that requires old GPU data from a
+   full-cover PUT that may legally discard it.
+30. This changes the leading optimization model. The readback volume is modest,
+   yet the pipeline pays hundreds of fault, handoff, and GPU-wait transitions
+   per second. The likely leverage is eliminating or batching the serialized
+   CPU/SPU -> RSX -> GPU coherence protocol, not reducing transfer bandwidth or
+   adding another NEON instruction. SPU MFC commands know their exact EA and
+   size before direct memory access, so a cheap page-state preflight could avoid
+   signal delivery and coalesce the rare slow path. It cannot call the renderer
+   unconditionally: the ledger saw about 3.57 million MFC submissions per
+   second but only about 206 confirmed SPU renderer faults per second. First,
+   an exact-range fault oracle must establish how many slow paths are genuine
+   logical overlaps versus macOS 16 KiB page rounding/false sharing. The MFC
+   timer itself executes at that 3.57-million/s rate, so this diagnostic run is
+   not a clean absolute-FPS benchmark even though its fault/readback direction
+   is strong. Before relying on exact MFC timing, compare this build against an
+   otherwise identical build with only the per-command MFC timer disabled. If
+   throughput changes by more than 3--5%, replace it with deterministic sparse
+   sampling or owner-local counters.
+31. The separate 5.265-second stack sample occurred later, after the exact
+   ledger window, when throughput had fallen to about 14.1 FPS and fault
+   pressure had warmed down; do not merge its percentages with the earlier
+   interval. It nevertheless localizes the mechanism: all 1,209 sampled SPU
+   renderer-fault stacks occurred inside `process_mfc_cmd`. Across the six SPUs,
+   mutually exclusive occupancy was 57.2% guest JIT execution, 18.2% actual
+   channel blocking, 16.5% non-fault/non-wait MFC host work, 3.8% renderer
+   faults, and 4.0% yields. The main PPU remained 64.7% guest compute and 3.9%
+   renderer fault; RSX CPU was not saturated, while Metal's serial command
+   queue dispatch consumed about 45% of one host core. This validates MFC as the
+   place to attach exact command context for the fault oracle, not as permission
+   to add a heavyweight check to every MFC submission.
 
 ## Current blocker
 
-The minimal two-site feedback snapshot is correct, but the first whole-surface
-content-generation cache only avoids 9 of roughly 164 requests per bedroom
-frame, simple disjoint-write generation roll-forward removed no additional
-copies, an exact cross-frame oracle found zero matches, and the write-region
-oracle found that every dominant refresh follows a full-surface write. The next
-leading paths are now architectural: the bounded equal-priority macOS
-scheduler oracle is complete, so build a causal Cell/RSX frame ledger next; in parallel,
-determine whether the dominant draws can safely render through ping-pong
-attachments or a narrowly legal Apple feedback mechanism, thereby avoiding
-the full snapshot. Keep the
-official 1280x720/100% configuration while measuring; use 50% scale only as a
-diagnostic of GPU/copy bandwidth. Separately evaluate the removed historical
-WCB/WDB performance patch only as a canary: its ten writes match this
-executable, but it repurposes live code and was removed from the official patch
-database in February 2026 without a published reason.
+The causal ledger is complete and has isolated a high-frequency Cell/RSX
+coherence chain with low readback bandwidth but expensive serialized handoffs.
+The next blocker is causal range attribution: classify each 16 KiB native-page
+fault as a true logical overlap, another-4-KiB-lane/padding false share, or an
+unknown/chain-only selection, while recording exact SPU MFC EA/size and the
+selected texture-cache section. Only then implement a fast atomic page-state
+preflight and batched slow path in MFC. Direct PPU JIT accesses still rely on
+host protection and cannot simply be converted to a 4 KiB software version
+table on macOS. In parallel, one bounded renderer-metadata run may decide
+whether the dominant full-screen feedback draws qualify for a snapshot-free
+ping-pong or Apple interlock path; stop that branch if coverage and
+destination-independence cannot be proven. Keep official 1280x720/100% settings
+and treat the removed historical WCB/WDB patch only as a canary.
 
 ## Current source work
 
@@ -229,12 +286,19 @@ database in February 2026 without a published reason.
 - Apple ARM runtime compile gate that performs a short quiescence handshake,
   compiles outside the global CPU lock on the requester, serializes concurrent
   misses, and safely releases peers on normal/abnormal exit.
-- Uncommitted renderer performance work on
+- Checkpointed renderer performance work on
   `opt/macos-tlou-feedback-snapshot-reuse`: per-render-target content tracking,
   safe snapshot reuse, exact-region refresh, and feedback-copy counters. A
   no-benefit proactive disjoint-write extension was tested and removed.
+- Equal-RR47 macOS scheduler correction in `ec2da5b59`; it removes the observed
+  PPU/SPU-to-RSX priority inversion and improves pacing, but is not a 30-FPS
+  throughput fix.
+- Debug-overlay-gated causal Cell/RSX coherence ledger in `5670a849f`, including
+  handled-fault origins, flush/readback waits and bytes, and sharded SPU
+  channel/MFC timing.
 
-All 191 enabled tests passed after these changes. Re-run after subsequent edits.
+All 188 enabled tests passed after the coherence-ledger changes; two tests are
+disabled in the existing suite. Re-run after subsequent edits.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
@@ -246,6 +310,13 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
 ## Safety/state
 
 - No RPCS3 test process should remain after an experiment.
+- The clean coherence capture is
+  `/Users/hamza/Documents/rpcs3-repro/cell-ledger-correct.2AmIiU/home/Library/Caches/rpcs3/RPCS3.log`
+  (SHA-256 `ad39db152b22c01199ac9cc78a69aa852fb21737e42cc23f12d354e2f2b81979`).
+  The matching stack sample is durably preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/cellstat-2026-08-08/rpcs3-cellstat-bedroom-d46e343.sample.txt` (SHA-256
+  `0d5655cf330555b7dd4434565bf2c0af9dc0c3e4a7ea4e3a8dbdb70c4f76fcf0`).
+  The exact 60-second log byte interval is `12120418..12981849`.
 - The final renderer profile is
   `home-release-lto-feedback-copy-edge`; it ran windowed with Strict Off,
   `Force Framebuffer Feedback Copies` On, and the Release+ThinLTO binary.

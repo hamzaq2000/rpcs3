@@ -44,23 +44,34 @@ effective log configuration rather than only the intended YAML values.
 | QoS-only scheduler oracle | PPU/SPU/RSX became equal timeshare threads; preliminary steady window was 10.24 FPS with no >200 ms gap. Immediately following max-RR control was 12.05 FPS but had one 1.06 s gap; a separate clean max-RR sample reached 15.03 FPS | Removing fixed RR smooths tails but loses throughput; do not promote it. Test one final equal-RR47 arm, then stop scheduler work if no substantial win |
 | Equal-RR47 scheduler oracle | All PPU/SPU/RSX threads verified RR47. Clean 30-second window: 15.08 FPS, p95 78.1 ms, max 92.1 ms; following 60-second thermal-drift window: 13.96 FPS, p95 82.7 ms, max 109.3 ms; no >200 ms gap in either. Reached hom-const at 1:41 vs 2:13 for adjacent max-RR control | Removes the real priority inversion and improves pacing/startup, but does not beat the best max-RR throughput. Preserve as a candidate; stop priority tuning and pivot to coherence ledger |
 | Max-RR Cell/RSX sample | Six SPUs: 47.7% guest compute, 52.1% channel/MFC/fault/wait; direct VM/RSX faults 12.5%, 72.7% ending in Vulkan/mutex waits. Main PPU: 56.3% compute, 22.7% faults, 21.0% waits. Compilers idle | The deficit is split between guest execution and synchronization/coherence; architecture-level causal tracing is justified |
+| CELLSTAT diagnostic validation | Signal-safe handled-fault timers, RSX handoff/readback counters, and sharded SPU channel/MFC timers passed Release+ThinLTO compilation and all 188 enabled tests; 128-byte isolation matches the M3 cache line | Safe enough for a bounded causal capture; counters are cumulative and inclusive, so use deltas and never add nested times |
+| Clean Cell/RSX coherence ledger | 58.716 s, 1,043 presents (17.76 FPS), no compilation/timeouts. Confirmed 1,043 PPU + 12,086 SPU renderer faults; 10,002 flush producer waits; 6,258 GPU readback waits averaging 2.22 ms; only 2.018 GB read back (~34.4 MB/s) | Synchronization latency and handoff frequency dominate the readback chain, not raw transfer bandwidth. Fault-side exact-range attribution is now the leading CPU-side experiment |
+| Matching feedback workload during CELLSTAT | ~163.47 requests, 154.47 copies, 58 new snapshots, 96.47 refreshes, 9 generation reuses, and ~702.6 MiB logical copied per frame; every one of 101,198 dirty candidates was full coverage | Confirms the snapshot-reuse, cross-frame, and dirty-region branches remain exhausted; the coherence result is not caused by a changed renderer workload |
 
 ## Next experiments
 
-1. Build a causal Cell/RSX ledger for PPU/SPU CPU time, channel and reservation
-   waits, MFC/VM faults, RSX flush-queue latency, and GPU readback waits.
+1. Run an otherwise-identical MFC-timer-off control. The exact per-command
+   timer currently executes 3.57 million times per second; reject it if it
+   changes throughput by more than 3--5%, and use deterministic sparse timing
+   or owner-local counters instead.
 2. Add a fixed-ring fault oracle that classifies 16 KiB native-page faults as
    logical hits, other-lane/padding hits, or chain-only selections, and records
-   actual readback bytes plus unioned wait intervals per frame.
-3. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+   exact SPU MFC EA/size, selected texture-cache ranges, actual readback bytes,
+   and unioned wait intervals per frame.
+3. If the oracle shows material SPU false sharing or repeated exact-range slow
+   paths, prototype an atomic native-page ownership/version preflight in MFC.
+   The common path must remain a few local loads: 3.57 million MFC submissions
+   per second cannot unconditionally call into RSX. Batch/coalesce only the
+   roughly 206-per-second slow path while preserving all current fallbacks.
+4. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-4. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+5. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-5. Only after the supported renderer path is measured, isolate-test the removed
+6. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-6. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+7. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
