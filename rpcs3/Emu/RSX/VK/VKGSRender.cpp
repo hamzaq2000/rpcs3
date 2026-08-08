@@ -16,6 +16,7 @@
 #include "vkutils/scratch.h"
 
 #include "Emu/RSX/rsx_methods.h"
+#include "Emu/RSX/RSXCoherenceStats.h"
 #include "Emu/RSX/Host/MM.h"
 #include "Emu/RSX/Host/RSXDMAWriter.h"
 #include "Emu/RSX/NV47/HW/context_accessors.define.h"
@@ -894,6 +895,8 @@ VKGSRender::~VKGSRender()
 
 bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 {
+	rsx::coherence_stats::scoped_timer fault_timer(rsx::coherence_stats::g_ledger.vk_fault_probe);
+
 	rsx::mm_flush(address);
 
 	vk::texture_cache::thrashed_set result;
@@ -965,7 +968,10 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 		if (has_queue_ref)
 		{
 			// Wait for the RSX thread to process request if it hasn't already
-			m_flush_requests.producer_wait();
+			{
+				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.vk_flush_wait);
+				m_flush_requests.producer_wait();
+			}
 
 			data_transfer_completed_callback = [&]()
 			{

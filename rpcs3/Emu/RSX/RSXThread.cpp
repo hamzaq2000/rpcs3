@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "RSXThread.h"
+#include "RSXCoherenceStats.h"
 
 #include "Capture/rsx_capture.h"
 #include "Common/surface_store.h"
@@ -28,6 +29,7 @@
 #include "Utilities/date_time.h"
 
 #include "util/asm.hpp"
+#include "util/sysinfo.hpp"
 
 #include <span>
 #include <thread>
@@ -621,6 +623,7 @@ namespace rsx
 	thread::~thread()
 	{
 		g_access_violation_handler = nullptr;
+		coherence_stats::set_enabled(false);
 	}
 
 	void thread::save(utils::serial& ar)
@@ -690,9 +693,37 @@ namespace rsx
 	thread::thread(utils::serial* _ar)
 		: cpu_thread(0x5555'5555)
 	{
+		coherence_stats::reset();
+		coherence_stats::set_enabled(!!g_cfg.video.debug_overlay);
+
 		g_access_violation_handler = [this](u32 address, bool is_writing)
 		{
-			return on_access_violation(address, is_writing);
+			auto* counter = &coherence_stats::g_ledger.renderer_fault_other;
+
+			if (const cpu_thread* cpu = get_current_cpu_thread())
+			{
+				switch (cpu->get_class())
+				{
+				case thread_class::ppu:
+					counter = &coherence_stats::g_ledger.renderer_fault_ppu;
+					break;
+				case thread_class::spu:
+					counter = &coherence_stats::g_ledger.renderer_fault_spu;
+					break;
+				default:
+					break;
+				}
+			}
+
+			coherence_stats::scoped_timer timer(*counter);
+			const bool handled = on_access_violation(address, is_writing);
+
+			if (!handled)
+			{
+				timer.cancel();
+			}
+
+			return handled;
 		};
 
 		m_textures_dirty.fill(true);
@@ -3204,6 +3235,9 @@ namespace rsx
 
 	void thread::on_frame_end(u32 buffer, bool forced)
 	{
+		const bool cellstat_enabled = !!g_cfg.video.debug_overlay;
+		coherence_stats::set_enabled(cellstat_enabled);
+
 		bool pause_emulator = false;
 
 		// MM sync. This is a pre-emptive operation, so we can use a deferred request.
@@ -3315,6 +3349,37 @@ namespace rsx
 		// Reset current stats
 		m_frame_stats = {};
 		m_profiler.enabled = !!g_cfg.video.debug_overlay;
+
+		if (cellstat_enabled)
+		{
+			static u64 s_last_cellstat_time = 0;
+			const u64 now = get_system_time();
+
+			if (!s_last_cellstat_time || now - s_last_cellstat_time >= 1'000'000)
+			{
+				s_last_cellstat_time = now;
+
+				const auto stats = coherence_stats::snapshot();
+				const u64 frequency = utils::get_tsc_freq();
+				const auto to_us = [frequency](const coherence_stats::timed_snapshot& value)
+				{
+					return coherence_stats::ticks_to_us(value.ticks, frequency);
+				};
+
+				perf_log.notice("CELLSTAT v=1 tsc_hz=%llu av_ppu_n=%llu av_ppu_us=%llu av_spu_n=%llu av_spu_us=%llu av_other_n=%llu av_other_us=%llu vk_probe_n=%llu vk_probe_us=%llu flush_wait_n=%llu flush_wait_us=%llu gpu_event_wait_n=%llu gpu_event_wait_us=%llu readback_wait_n=%llu readback_wait_us=%llu readback_bytes=%llu spu_ch_wait_n=%llu spu_ch_wait_us=%llu spu_mfc_n=%llu spu_mfc_us=%llu",
+					frequency,
+					stats.renderer_fault_ppu.count, to_us(stats.renderer_fault_ppu),
+					stats.renderer_fault_spu.count, to_us(stats.renderer_fault_spu),
+					stats.renderer_fault_other.count, to_us(stats.renderer_fault_other),
+					stats.vk_fault_probe.count, to_us(stats.vk_fault_probe),
+					stats.vk_flush_wait.count, to_us(stats.vk_flush_wait),
+					stats.gpu_event_wait.count, to_us(stats.gpu_event_wait),
+					stats.gpu_readback_wait.count, to_us(stats.gpu_readback_wait),
+					stats.gpu_readback_bytes,
+					stats.spu_channel_wait.count, to_us(stats.spu_channel_wait),
+					stats.spu_mfc_process.count, to_us(stats.spu_mfc_process));
+			}
+		}
 	}
 
 	f64 thread::get_cached_display_refresh_rate()

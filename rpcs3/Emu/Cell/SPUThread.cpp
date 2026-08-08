@@ -24,6 +24,7 @@
 #include "Emu/Cell/timers.hpp"
 
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+#include "Emu/RSX/RSXCoherenceStats.h"
 
 #include <cmath>
 #include <cfenv>
@@ -1694,6 +1695,7 @@ void spu_thread::cpu_work()
 	if (gen_interrupt)
 	{
 		// Interrupt! escape everything and restart execution
+		rsx::coherence_stats::finish_active_mfc_process();
 		spu_runtime::g_escape(this);
 	}
 }
@@ -3870,6 +3872,7 @@ bool spu_thread::do_mfc(bool can_escape, bool must_finish)
 
 		if (can_escape && check_mfc_interrupts(pc + 4))
 		{
+			rsx::coherence_stats::finish_active_mfc_process();
 			spu_runtime::g_escape(this);
 		}
 
@@ -4216,6 +4219,8 @@ u32 evaluate_spin_optimization(std::span<u8> stats, u64 evaluate_time, const cfg
 
 bool spu_thread::process_mfc_cmd()
 {
+	rsx::coherence_stats::scoped_mfc_timer mfc_timer(id);
+
 	// Stall infinitely if MFC queue is full
 	while (mfc_size >= 16) [[unlikely]]
 	{
@@ -4948,6 +4953,7 @@ bool spu_thread::process_mfc_cmd()
 			if (check_mfc_interrupts(pc + 4))
 			{
 				do_mfc(false);
+				rsx::coherence_stats::finish_active_mfc_process();
 				spu_runtime::g_escape(this);
 			}
 
@@ -5556,6 +5562,8 @@ s64 spu_thread::get_ch_value(u32 ch)
 		{
 			return events.events & mask1;
 		}
+
+		rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.spu_channel_wait);
 
 		spu_function_logger logger(*this, "MFC Events read");
 
@@ -7262,6 +7270,8 @@ s64 spu_channel::pop_wait(cpu_thread& spu, bool pop)
 		}
 	}
 
+	rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.spu_channel_wait);
+
 	lv2_obj::notify_all();
 
 	old = (pop ? bit_occupy : 0) | bit_wait;
@@ -7342,6 +7352,8 @@ bool spu_channel::push_wait(cpu_thread& spu, u32 value, bool push)
 		state = data;
 	}
 
+	rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.spu_channel_wait);
+
 	while (true)
 	{
 		if (!(state & bit_wait))
@@ -7401,6 +7413,8 @@ std::pair<u32, u32> spu_channel_4_t::pop_wait(cpu_thread& spu, bool pop_value)
 			return {1, static_cast<u32>(pop_value ? jostling_value.exchange(0) : 0)};
 		}
 	}
+
+	rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.spu_channel_wait);
 
 	while (true)
 	{

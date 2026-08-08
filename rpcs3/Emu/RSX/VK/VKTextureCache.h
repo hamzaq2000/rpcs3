@@ -8,6 +8,7 @@
 
 #include "../Common/texture_cache.h"
 #include "../Common/tiled_dma_copy.hpp"
+#include "../RSXCoherenceStats.h"
 
 #include <memory>
 #include <vector>
@@ -280,7 +281,10 @@ namespace vk
 			AUDIT(synchronized);
 
 			// Synchronize, reset dma_fence after waiting
-			vk::wait_for_event(dma_fence.get(), GENERAL_WAIT_TIMEOUT);
+			{
+				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.gpu_readback_wait);
+				vk::wait_for_event(dma_fence.get(), GENERAL_WAIT_TIMEOUT);
+			}
 
 			// Calculate smallest range to flush - for framebuffers, the raster region is enough
 			const auto range = (context == rsx::texture_upload_context::framebuffer_storage) ? get_section_range() : get_confirmed_range();
@@ -295,6 +299,7 @@ namespace vk
 			}
 
 			vk::flush_dma(range.start, flush_length);
+			rsx::coherence_stats::record_readback_bytes(flush_length);
 
 #if DEBUG_DMA_TILING
 			// Are we a tiled region?

@@ -7,6 +7,7 @@
 #include "shared.h"
 
 #include "Emu/Cell/timers.hpp"
+#include "Emu/RSX/RSXCoherenceStats.h"
 
 #include "util/sysinfo.hpp"
 #include "util/asm.hpp"
@@ -588,6 +589,8 @@ namespace vk
 
 	VkResult wait_for_event(event* pEvent, u64 timeout)
 	{
+		rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.gpu_event_wait);
+
 		// Convert timeout to TSC cycles. Timeout accuracy isn't super-important, only fast response when event is signaled (within 10us if possible)
 		const u64 freq = utils::get_tsc_freq();
 
