@@ -55,18 +55,18 @@ The important existing paths are:
 
 ## Phase 0: observer control
 
-Preserve commit `5670a849f` as the exact-MFC-timer arm. Compare it against an
-otherwise identical build with only per-command MFC timing disabled, retaining
-the same overlay and lower-rate counters. Reject exact timing if throughput
-changes by more than 3--5%, pacing changes materially, or faults per frame move
-by more than about 3%. If exact MFC timing is still needed, use deterministic
-1/1024 or 1/4096 sampling or owner-local counters published outside the hot
-path.
+Commit `5670a849f` preserves the exact-MFC-timer arm. Commit `18092fc7c`
+removes that 3.57-million-calls/s timer and retains the lower-rate ledger plus a
+single relaxed enable check on each executed MFC transfer. The next capture
+must compare otherwise identical overlay-on and overlay-off windows. Reject or
+redesign the observer if throughput changes by more than 3--5%, pacing changes
+materially, or faults per frame move by more than about 3%.
 
 ## Phase 1: fault-side causal ring
 
-Before changing behavior, record only the roughly 224 confirmed faults per
-second in a fixed, preallocated, signal-safe ring. Each event should contain:
+Commit `18092fc7c` implements this behavior-neutral stage. It records only the
+roughly 224 confirmed faults per second in a fixed, preallocated, signal-safe
+4,096-entry ring. Each event contains:
 
 - frame/sequence and timestamp;
 - origin class and thread/SPU ID;
@@ -74,18 +74,28 @@ second in a fixed, preallocated, signal-safe ring. Each event should contain:
   safely available;
 - active MFC EA, size, direction, command/list/atomic class, tag, and SPU PC;
 - native 16 KiB page and touched logical 4 KiB lanes;
-- candidate texture sections' full, confirmed, and locked ranges, context,
-  protection, synchronized state, and generation;
-- selected readback range and bytes, flush-queue wait, GPU-event wait, and
-  concurrent waiter count;
+- the actual readback texture section's full, confirmed, and native-page-
+  expanded locked ranges, context, protection, synchronized state, and tags,
+  captured while the texture-cache lock still protects its lifetime;
+- selected readback range and bytes plus nested flush-queue and GPU-event wait
+  intervals;
 - classification as exact logical overlap, another-lane overlap, padding only,
   invalidation-chain only, ZCULL, or unknown;
-- MFC issue-to-tag-consumption slack where it can be measured without adding a
-  hot-path scan.
+- synchronization, last-write, and post-wait ROP tags for correlation. The ROP
+  tag is not exact selection-time proof.
 
-Do not allocate or log from the signal handler. Publish fixed event records and
-aggregate/dump them from RSX frame end. Preserve the current fallback for every
-unknown or ambiguous case.
+The signal handler performs no allocation or logging. It publishes fixed event
+records, and the RSX frame-end path emits cumulative `CELLSTAT` plus one-second
+`CELLFAULT_SUM` and bounded `CELLFAULT_TOP` aggregates. Multiple selected
+readback sections deliberately become `multi_unknown`; unknown or ambiguous
+cases never alter the existing fallback.
+
+A capture is invalid for causal percentages when ring drops or signature
+overflow are nonzero, or when section overflow/mismatch, missing MFC context,
+or offloader handoff is material. Require at least 95% of SPU handled faults to
+carry an exact MFC range containing the fault. Timing fields are inclusive:
+GPU-event and readback waits currently wrap the same call, and neither may be
+added to the outer fault/MFC time.
 
 Implementation work proceeds only if a small stable set of ranges/pages
 explains at least 80% of readback wait or a dry-run policy predicts at least

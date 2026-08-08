@@ -47,17 +47,19 @@ effective log configuration rather than only the intended YAML values.
 | CELLSTAT diagnostic validation | Signal-safe handled-fault timers, RSX handoff/readback counters, and sharded SPU channel/MFC timers passed Release+ThinLTO compilation and all 188 enabled tests; 128-byte isolation matches the M3 cache line | Safe enough for a bounded causal capture; counters are cumulative and inclusive, so use deltas and never add nested times |
 | Clean Cell/RSX coherence ledger | 58.716 s, 1,043 presents (17.76 FPS), no compilation/timeouts. Confirmed 1,043 PPU + 12,086 SPU renderer faults; 10,002 flush producer waits; 6,258 GPU readback waits averaging 2.22 ms; only 2.018 GB read back (~34.4 MB/s) | Synchronization latency and handoff frequency dominate the readback chain, not raw transfer bandwidth. Fault-side exact-range attribution is now the leading CPU-side experiment |
 | Matching feedback workload during CELLSTAT | ~163.47 requests, 154.47 copies, 58 new snapshots, 96.47 refreshes, 9 generation reuses, and ~702.6 MiB logical copied per frame; every one of 101,198 dirty candidates was full coverage | Confirms the snapshot-reuse, cross-frame, and dirty-region branches remain exhausted; the coherence result is not caused by a changed renderer workload |
+| Fault-attribution oracle checkpoint | Removed the 3.57-million/s MFC timer; added a 4,096-entry signal-safe fault ring, exact DMA/list/atomic MFC context, locked texture-section range classification, nested wait/readback attribution, and compact one-second summaries. Release+ThinLTO `rpcs3_emu` built and all 195 enabled tests passed | Ready for a behavior-neutral causal capture. Reject intervals with material drops, signature/section overflow, readback mismatch, missing MFC context, or offloader attribution; compare overlay on/off for observer cost |
 
 ## Next experiments
 
-1. Run an otherwise-identical MFC-timer-off control. The exact per-command
-   timer currently executes 3.57 million times per second; reject it if it
-   changes throughput by more than 3--5%, and use deterministic sparse timing
-   or owner-local counters instead.
-2. Add a fixed-ring fault oracle that classifies 16 KiB native-page faults as
-   logical hits, other-lane/padding hits, or chain-only selections, and records
-   exact SPU MFC EA/size, selected texture-cache ranges, actual readback bytes,
-   and unioned wait intervals per frame.
+1. Run the new fault-oracle build in the steady bedroom and validate its own
+   integrity gates: zero drops and signature overflow, immaterial
+   multi-section/offloader cases, readback-count agreement, and at least 95%
+   exact MFC-context coverage for SPU faults. Compare an otherwise-identical
+   overlay-off window and reject more than 3--5% observer slowdown.
+2. Group the deterministic PPU fault and SPU MFC faults by exact address/range,
+   direction, command class, selected section, and wait/readback cost. Continue
+   only if stable keys explain at least 80% of readback wait or predict at
+   least 5 ms/frame of critical-path savings.
 3. If the oracle shows material SPU false sharing or repeated exact-range slow
    paths, prototype an atomic native-page ownership/version preflight in MFC.
    The common path must remain a few local loads: 3.57 million MFC submissions

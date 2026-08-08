@@ -98,8 +98,8 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     TLoU is creating a large offscreen surface/atlas. One 3072x1024 RGBA8
     snapshot is 12 MiB, so the surface is performance-relevant without being a
     configuration error.
-15. A first content-generation snapshot cache is implemented on branch
-    `opt/macos-tlou-feedback-snapshot-reuse` but is not committed yet. Every
+15. A first content-generation snapshot cache is checkpointed on branch
+    `opt/macos-tlou-feedback-snapshot-reuse`. Every
     render-target write advances a logical content generation, cached dynamic
     snapshots remember the generation they copied, and unchanged sources reuse
     the snapshot. Unknown owners still copy. Cached refreshes now preserve the
@@ -261,22 +261,35 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
    queue dispatch consumed about 45% of one host core. This validates MFC as the
    place to attach exact command context for the fault oracle, not as permission
    to add a heavyweight check to every MFC submission.
+32. Commit `18092fc7c` implements the first-stage fault attribution oracle
+    without changing emulation decisions. It removes the perturbative
+    per-command MFC timer, carries a lightweight TLS context only around actual
+    DMA/list/atomic memory execution, and publishes confirmed renderer faults
+    into a bounded 4,096-entry MPSC ring. Each event records the CPU origin,
+    host and guest PCs, fault direction/width evidence, exact MFC EA/size/class,
+    renderer path, nested handoff/readback intervals, actual readback range, and
+    texture-section full/confirmed/native-page-expanded ranges captured under
+    the texture-cache lock. The RSX thread emits one-second summaries and
+    bounded top signatures. All 195 enabled tests pass, including seven new
+    queue/context/classification tests; two pre-existing tests remain disabled.
+    The live capture is valid only when ring drops, signature overflow,
+    multi-section overflow/mismatch, MFC-context misses, and offloader events
+    are zero or immaterial. Because the hot path still performs one relaxed
+    enable load per executed MFC transfer, a debug-on/off observer A/B remains
+    mandatory before using its absolute FPS.
 
 ## Current blocker
 
-The causal ledger is complete and has isolated a high-frequency Cell/RSX
-coherence chain with low readback bandwidth but expensive serialized handoffs.
-The next blocker is causal range attribution: classify each 16 KiB native-page
-fault as a true logical overlap, another-4-KiB-lane/padding false share, or an
-unknown/chain-only selection, while recording exact SPU MFC EA/size and the
-selected texture-cache section. Only then implement a fast atomic page-state
+The fault-side causal ring is implemented and verified; the current blocker is
+the first clean live attribution capture. It must classify each 16 KiB
+native-page fault as a true logical overlap, another-4-KiB-lane/padding false
+share, or an unknown/chain-only selection, and show whether a small stable set
+of keys explains at least 80% of readback wait or predicts at least 5 ms/frame
+of critical-path savings. Only then implement a fast atomic page-state
 preflight and batched slow path in MFC. Direct PPU JIT accesses still rely on
 host protection and cannot simply be converted to a 4 KiB software version
-table on macOS. In parallel, one bounded renderer-metadata run may decide
-whether the dominant full-screen feedback draws qualify for a snapshot-free
-ping-pong or Apple interlock path; stop that branch if coverage and
-destination-independence cannot be proven. Keep official 1280x720/100% settings
-and treat the removed historical WCB/WDB patch only as a canary.
+table on macOS. Keep official 1280x720/100% settings and treat the removed
+historical WCB/WDB patch only as a canary.
 
 ## Current source work
 
@@ -296,9 +309,13 @@ and treat the removed historical WCB/WDB patch only as a canary.
 - Debug-overlay-gated causal Cell/RSX coherence ledger in `5670a849f`, including
   handled-fault origins, flush/readback waits and bytes, and sharded SPU
   channel/MFC timing.
+- Bounded Cell/RSX fault attribution oracle in `18092fc7c`, including exact MFC
+  execution context, signal-safe fault capture, locked texture-section range
+  classification, and compact `CELLFAULT_SUM`/`CELLFAULT_TOP` output. It also
+  removes the perturbative exact-MFC timer from the capture build.
 
-All 188 enabled tests passed after the coherence-ledger changes; two tests are
-disabled in the existing suite. Re-run after subsequent edits.
+All 195 enabled tests passed after the fault-oracle changes; two tests remain
+disabled in the existing suite.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer

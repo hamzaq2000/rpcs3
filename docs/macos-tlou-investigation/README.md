@@ -44,7 +44,9 @@ roughly 224 confirmed Cell-to-RSX coherence faults and 107 synchronous GPU
 readback waits per second while transferring only about 34 MB/s back to the
 CPU. The next architecture experiment therefore targets the handoff and
 coherence protocol—not another arithmetic instruction or smaller raw copies.
-A fault-side causal ring must first distinguish genuine logical overlap from
-macOS 16 KiB host-page false sharing and identify read/GET versus overwrite/PUT
-semantics. Only then should exact-range SPU MFC preflight and batching be
-implemented.
+Commit `18092fc7c` adds a bounded fault-side causal ring that records exact SPU
+MFC ranges, fault identity, selected texture-section ranges, and the nested
+flush/readback intervals without changing emulation behavior. The next live
+capture must distinguish genuine logical overlap from macOS 16 KiB host-page
+false sharing and identify read/GET versus overwrite/PUT semantics. Only then
+should exact-range SPU MFC preflight and batching be implemented.
