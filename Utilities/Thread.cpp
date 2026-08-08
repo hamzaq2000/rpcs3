@@ -2761,9 +2761,8 @@ void thread_base::start()
 #elif defined(__APPLE__)
 	pthread_attr_t attrs;
 	pthread_t thread_id{};
-	struct sched_param sp;
-	memset(&sp, 0, sizeof(struct sched_param));
-	sp.sched_priority=99;
+	sched_param sp{};
+	sp.sched_priority = sched_get_priority_max(SCHED_RR);
 	pthread_attr_init(&attrs);
 	pthread_attr_setstacksize(&attrs, 0x800000);
 	
