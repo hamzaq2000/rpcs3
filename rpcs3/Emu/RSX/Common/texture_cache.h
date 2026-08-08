@@ -7,6 +7,7 @@
 #include "texture_cache_predictor.h"
 #include "texture_cache_helpers.h"
 
+#include <array>
 #include <unordered_map>
 
 #define RSX_GCM_FORMAT_IGNORED 0
@@ -146,6 +147,9 @@ namespace rsx
 			rsx::simple_array<copy_region_descriptor> sections_to_copy;
 			texture_channel_remap_t remap;
 			deferred_request_command op = deferred_request_command::nop;
+			framebuffer_feedback_copy_reason feedback_copy_reason = framebuffer_feedback_copy_reason::none;
+			const surface_content_tracker* source_content_tracker = nullptr;
+			u64 copied_content_generation = 0;
 			u32 external_ref_addr = 0;
 			u16 x = 0;
 			u16 y = 0;
@@ -188,6 +192,44 @@ namespace rsx
 				// Return typed null
 				return external_handle;
 			}
+		};
+
+		struct framebuffer_feedback_copy_statistics
+		{
+			u64 requests = 0;
+			u64 live_rop_requests = 0;
+			u64 edge_clamped_requests = 0;
+			u64 actual_copies = 0;
+			u64 new_snapshots = 0;
+			u64 cache_refreshes = 0;
+			u64 generation_reuses = 0;
+			u64 static_cache_hits = 0;
+			u64 uncached_copies = 0;
+			u64 failures = 0;
+			u64 logical_copied_bytes = 0;
+			u64 logical_reused_bytes = 0;
+			u64 same_frame_remap_duplicate_copies = 0;
+			u64 same_frame_remap_duplicate_bytes = 0;
+			u64 cross_frame_structural_matches = 0;
+			u64 cross_frame_would_reuse = 0;
+			u64 cross_frame_would_refresh = 0;
+			u64 cross_frame_unknown_generation = 0;
+			u64 cross_frame_would_reuse_bytes = 0;
+			u64 cross_frame_prior_metadata_count = 0;
+			u64 cross_frame_prior_metadata_bytes = 0;
+			u64 partial_oracle_candidates = 0;
+			u64 partial_oracle_complete = 0;
+			u64 partial_oracle_zero_dirty = 0;
+			u64 partial_oracle_partial = 0;
+			u64 partial_oracle_full_coverage = 0;
+			u64 partial_oracle_fallback_unknown = 0;
+			u64 partial_oracle_fallback_overflow = 0;
+			u64 partial_oracle_fallback_unavailable_or_gap = 0;
+			u64 partial_oracle_write_events_examined = 0;
+			u64 partial_oracle_max_events_per_refresh = 0;
+			u64 partial_oracle_full_candidate_bytes = 0;
+			u64 partial_oracle_hypothetical_union_bytes = 0;
+			u64 partial_oracle_hypothetical_bbox_bytes = 0;
 		};
 
 		struct sampled_image_descriptor : public sampled_image_descriptor_base
@@ -470,6 +512,91 @@ namespace rsx
 		atomic_t<u32> m_texture_upload_calls_this_frame = { 0 };
 		atomic_t<u32> m_texture_upload_misses_this_frame = { 0 };
 		atomic_t<u32> m_texture_copies_ellided_this_frame = { 0 };
+		framebuffer_feedback_copy_statistics m_feedback_copy_stats{};
+		framebuffer_feedback_copy_statistics m_feedback_copy_totals{};
+		u64 m_feedback_stats_frame_count = 0;
+
+		static constexpr usz m_feedback_copy_signature_capacity = 24;
+		static constexpr usz m_feedback_copy_signature_report_count = 8;
+
+		struct framebuffer_feedback_copy_signature
+		{
+			u64 source_identity = 0;
+			u32 request_address = 0;
+			u32 source_address = 0;
+			u32 pitch = 0;
+			u32 gcm_format = 0;
+			u32 remap = 0;
+			u16 x = 0;
+			u16 y = 0;
+			u16 width = 0;
+			u16 height = 0;
+			u16 depth = 0;
+			u8 bpp = 0;
+			deferred_request_command op = deferred_request_command::nop;
+			framebuffer_feedback_copy_reason reason = framebuffer_feedback_copy_reason::none;
+
+			bool operator ==(const framebuffer_feedback_copy_signature&) const = default;
+
+			bool same_backing_ignoring_remap(const framebuffer_feedback_copy_signature& other) const
+			{
+				auto lhs = *this;
+				auto rhs = other;
+				lhs.remap = 0;
+				rhs.remap = 0;
+				return lhs == rhs;
+			}
+		};
+
+		struct framebuffer_feedback_copy_signature_entry
+		{
+			framebuffer_feedback_copy_signature signature{};
+			u64 estimated_copies = 0;
+			u64 estimated_copied_bytes = 0;
+			u64 copy_count_error = 0;
+			u64 copied_bytes_error = 0;
+			u64 remap_duplicate_copies = 0;
+			u64 remap_duplicate_bytes = 0;
+			u64 first_generation = 0;
+			u64 last_generation = 0;
+			u64 last_copy_frame = 0;
+		};
+
+		std::array<framebuffer_feedback_copy_signature_entry, m_feedback_copy_signature_capacity> m_feedback_copy_signatures{};
+		u64 m_feedback_copy_signature_last_report_time_us = 0;
+
+		struct framebuffer_feedback_cross_frame_key
+		{
+			u64 source_handle_identity = 0;
+			u64 source_tracker_identity = 0;
+			u32 request_address = 0;
+			u32 source_address = 0;
+			utils::address_range32 cache_range{};
+			u32 pitch = 0;
+			u32 gcm_format = 0;
+			u32 remap = 0;
+			u16 x = 0;
+			u16 y = 0;
+			u16 width = 0;
+			u16 height = 0;
+			u16 depth = 0;
+			u8 bpp = 0;
+			deferred_request_command op = deferred_request_command::nop;
+			framebuffer_feedback_copy_reason reason = framebuffer_feedback_copy_reason::none;
+
+			bool operator ==(const framebuffer_feedback_cross_frame_key&) const = default;
+		};
+
+		struct framebuffer_feedback_cross_frame_metadata
+		{
+			framebuffer_feedback_cross_frame_key key{};
+			u64 copied_content_generation = 0;
+			u64 logical_copy_bytes = 0;
+		};
+
+		// Debug-only oracle metadata. Pointer values are reduced to integer fingerprints;
+		// this collection never owns or exposes a prior-frame resource or view.
+		std::vector<framebuffer_feedback_cross_frame_metadata> m_previous_frame_feedback_copy_metadata;
 		static const u32 m_predict_max_flushes_per_frame = 50; // Above this number the predictions are disabled
 
 		// Invalidation
@@ -495,10 +622,465 @@ namespace rsx
 		virtual image_view_type generate_3d_from_2d_images(commandbuffer_type&, const deferred_subresource& desc) = 0;
 		virtual image_view_type generate_atlas_from_images(commandbuffer_type&, const deferred_subresource& desc) = 0;
 		virtual image_view_type generate_2d_mipmaps_from_images(commandbuffer_type&, const deferred_subresource& desc) = 0;
-		virtual void update_image_contents(commandbuffer_type&, image_view_type dst, image_resource_type src, u16 width, u16 height) = 0;
+		virtual void update_image_contents(commandbuffer_type&, image_view_type dst, const deferred_subresource& desc) = 0;
 		virtual bool render_target_format_is_compatible(image_storage_type* tex, u32 gcm_format) = 0;
 		virtual void prepare_for_dma_transfers(commandbuffer_type&) = 0;
 		virtual void cleanup_after_dma_transfers(commandbuffer_type&) = 0;
+
+		static const char* get_feedback_copy_reason_name(framebuffer_feedback_copy_reason reason)
+		{
+			switch (reason)
+			{
+			case framebuffer_feedback_copy_reason::live_rop:
+				return "live";
+			case framebuffer_feedback_copy_reason::edge_clamped_merge:
+				return "edge";
+			default:
+				return "none";
+			}
+		}
+
+		static u64 get_feedback_copy_logical_bytes(const deferred_subresource& desc)
+		{
+			return static_cast<u64>(desc.width) * desc.height *
+				std::max<u16>(desc.depth, 1) * std::max<u8>(desc.bpp, 1);
+		}
+
+		static bool is_partial_refresh_oracle_candidate(const deferred_subresource& desc)
+		{
+			// live_rop descriptors are constructed from 2D render targets. Keep the
+			// explicit depth restriction here so later call sites cannot silently feed
+			// a layered/3D copy into this 2D rectangle model.
+			return desc.feedback_copy_reason == framebuffer_feedback_copy_reason::live_rop &&
+				desc.op == deferred_request_command::copy_image_dynamic &&
+				!desc.do_not_cache && desc.external_handle && desc.source_content_tracker &&
+				desc.width && desc.height && desc.depth <= 1;
+		}
+
+		static u64 get_surface_rect_union_area(
+			const std::array<surface_content_write_rect, 64>& rects, u32 count)
+		{
+			if (!count)
+			{
+				return 0;
+			}
+
+			std::array<u32, 128> x_edges{};
+			for (u32 index = 0; index < count; ++index)
+			{
+				x_edges[index * 2] = rects[index].x1;
+				x_edges[index * 2 + 1] = rects[index].x2;
+			}
+
+			auto x_end = x_edges.begin() + count * 2;
+			std::sort(x_edges.begin(), x_end);
+			x_end = std::unique(x_edges.begin(), x_end);
+
+			u64 area = 0;
+			for (auto x_it = x_edges.begin(); x_it + 1 < x_end; ++x_it)
+			{
+				const u32 x1 = *x_it;
+				const u32 x2 = *(x_it + 1);
+				if (x1 == x2)
+				{
+					continue;
+				}
+
+				std::array<std::pair<u32, u32>, 64> y_intervals{};
+				u32 y_count = 0;
+				for (u32 index = 0; index < count; ++index)
+				{
+					const auto& rect = rects[index];
+					if (rect.x1 < x2 && rect.x2 > x1)
+					{
+						y_intervals[y_count++] = { rect.y1, rect.y2 };
+					}
+				}
+
+				std::sort(y_intervals.begin(), y_intervals.begin() + y_count);
+				u64 covered_y = 0;
+				if (y_count)
+				{
+					u32 merged_y1 = y_intervals[0].first;
+					u32 merged_y2 = y_intervals[0].second;
+					for (u32 index = 1; index < y_count; ++index)
+					{
+						const auto [y1, y2] = y_intervals[index];
+						if (y1 > merged_y2)
+						{
+							covered_y += merged_y2 - merged_y1;
+							merged_y1 = y1;
+							merged_y2 = y2;
+						}
+						else
+						{
+							merged_y2 = std::max(merged_y2, y2);
+						}
+					}
+
+					covered_y += merged_y2 - merged_y1;
+				}
+
+				area += static_cast<u64>(x2 - x1) * covered_y;
+			}
+
+			return area;
+		}
+
+		// Metadata-only same-frame oracle. The caller has already found an existing
+		// dynamic snapshot that needs a refresh; this routine only estimates how much
+		// of that snapshot changed and never alters the real copy/update operation.
+		void record_partial_refresh_oracle(const deferred_subresource& desc,
+			u64 copied_generation, u64 current_generation, u64 full_copy_bytes)
+		{
+			if (!g_cfg.video.debug_overlay || !is_partial_refresh_oracle_candidate(desc))
+			{
+				return;
+			}
+
+			auto& stats = m_feedback_copy_stats;
+			stats.partial_oracle_candidates++;
+			stats.partial_oracle_full_candidate_bytes += full_copy_bytes;
+
+			std::array<surface_content_write_rect, 64> clipped_rects{};
+			u32 clipped_count = 0;
+			const u32 region_x1 = desc.x;
+			const u32 region_y1 = desc.y;
+			const u32 region_x2 = region_x1 + desc.width;
+			const u32 region_y2 = region_y1 + desc.height;
+			u32 bbox_x1 = region_x2;
+			u32 bbox_y1 = region_y2;
+			u32 bbox_x2 = region_x1;
+			u32 bbox_y2 = region_y1;
+
+			u32 events_examined = 0;
+			const auto status = desc.source_content_tracker->visit_content_writes(
+				copied_generation, current_generation,
+				[&](const surface_content_write_rect& write_rect)
+				{
+					const surface_content_write_rect clipped
+					{
+						.x1 = std::max(write_rect.x1, region_x1),
+						.y1 = std::max(write_rect.y1, region_y1),
+						.x2 = std::min(write_rect.x2, region_x2),
+						.y2 = std::min(write_rect.y2, region_y2),
+					};
+
+					if (!clipped.valid())
+					{
+						return;
+					}
+
+					ensure(clipped_count < clipped_rects.size());
+					clipped_rects[clipped_count++] = clipped;
+					bbox_x1 = std::min(bbox_x1, clipped.x1);
+					bbox_y1 = std::min(bbox_y1, clipped.y1);
+					bbox_x2 = std::max(bbox_x2, clipped.x2);
+					bbox_y2 = std::max(bbox_y2, clipped.y2);
+				},
+				&events_examined);
+
+			stats.partial_oracle_write_events_examined += events_examined;
+			stats.partial_oracle_max_events_per_refresh =
+				std::max<u64>(stats.partial_oracle_max_events_per_refresh, events_examined);
+
+			const auto record_full_fallback = [&]
+			{
+				stats.partial_oracle_hypothetical_union_bytes += full_copy_bytes;
+				stats.partial_oracle_hypothetical_bbox_bytes += full_copy_bytes;
+			};
+
+			switch (status)
+			{
+			case surface_content_history_status::complete:
+				break;
+			case surface_content_history_status::unknown_or_full:
+				stats.partial_oracle_fallback_unknown++;
+				record_full_fallback();
+				return;
+			case surface_content_history_status::overflow:
+				stats.partial_oracle_fallback_overflow++;
+				record_full_fallback();
+				return;
+			case surface_content_history_status::unavailable:
+			case surface_content_history_status::broken_chain:
+			case surface_content_history_status::generation_mismatch:
+				stats.partial_oracle_fallback_unavailable_or_gap++;
+				record_full_fallback();
+				return;
+			}
+
+			stats.partial_oracle_complete++;
+			const u64 full_pixel_area = static_cast<u64>(desc.width) * desc.height;
+			const u64 union_area = std::min(get_surface_rect_union_area(clipped_rects, clipped_count), full_pixel_area);
+			const u64 bbox_area = clipped_count
+				? std::min(static_cast<u64>(bbox_x2 - bbox_x1) * (bbox_y2 - bbox_y1), full_pixel_area)
+				: 0;
+			const u64 bytes_per_pixel = std::max<u8>(desc.bpp, 1) * std::max<u16>(desc.depth, 1);
+
+			stats.partial_oracle_hypothetical_union_bytes += union_area * bytes_per_pixel;
+			stats.partial_oracle_hypothetical_bbox_bytes += bbox_area * bytes_per_pixel;
+
+			if (!union_area)
+			{
+				stats.partial_oracle_zero_dirty++;
+			}
+			else if (union_area >= full_pixel_area)
+			{
+				stats.partial_oracle_full_coverage++;
+			}
+			else
+			{
+				stats.partial_oracle_partial++;
+			}
+		}
+
+		static framebuffer_feedback_cross_frame_key get_feedback_cross_frame_key(const deferred_subresource& desc)
+		{
+			return
+			{
+				.source_handle_identity = static_cast<u64>(reinterpret_cast<uptr>(desc.external_handle)),
+				.source_tracker_identity = static_cast<u64>(reinterpret_cast<uptr>(desc.source_content_tracker)),
+				.request_address = desc.address,
+				.source_address = desc.external_ref_addr ? desc.external_ref_addr : desc.address,
+				.cache_range = desc.cache_range,
+				.pitch = desc.pitch,
+				.gcm_format = desc.gcm_format,
+				.remap = desc.remap.encoded,
+				.x = desc.x,
+				.y = desc.y,
+				.width = desc.width,
+				.height = desc.height,
+				.depth = std::max<u16>(desc.depth, 1),
+				.bpp = std::max<u8>(desc.bpp, 1),
+				.op = desc.op,
+				.reason = desc.feedback_copy_reason,
+			};
+		}
+
+		static bool is_cross_frame_feedback_candidate(const deferred_subresource& desc)
+		{
+			return desc.feedback_copy_reason != framebuffer_feedback_copy_reason::none &&
+				desc.op == deferred_request_command::copy_image_dynamic &&
+				!desc.do_not_cache && desc.external_handle && desc.source_content_tracker &&
+				desc.cache_range.valid();
+		}
+
+		void probe_previous_frame_feedback_copy(const deferred_subresource& desc, u64 source_content_generation)
+		{
+			if (!g_cfg.video.debug_overlay || !source_content_generation ||
+				!is_cross_frame_feedback_candidate(desc))
+			{
+				return;
+			}
+
+			const auto key = get_feedback_cross_frame_key(desc);
+			for (auto it = m_previous_frame_feedback_copy_metadata.begin();
+				it != m_previous_frame_feedback_copy_metadata.end(); ++it)
+			{
+				if (it->key != key)
+				{
+					continue;
+				}
+
+				m_feedback_copy_stats.cross_frame_structural_matches++;
+				if (!source_content_generation || !it->copied_content_generation)
+				{
+					m_feedback_copy_stats.cross_frame_unknown_generation++;
+				}
+				else if (source_content_generation == it->copied_content_generation)
+				{
+					m_feedback_copy_stats.cross_frame_would_reuse++;
+					m_feedback_copy_stats.cross_frame_would_reuse_bytes += it->logical_copy_bytes;
+				}
+				else
+				{
+					m_feedback_copy_stats.cross_frame_would_refresh++;
+				}
+
+				// Model a single persistent cache entry, not an unlimited number of hits
+				// against the same prior-frame allocation.
+				m_previous_frame_feedback_copy_metadata.erase(it);
+				return;
+			}
+		}
+
+		void snapshot_feedback_copy_metadata_for_next_frame()
+		{
+			m_previous_frame_feedback_copy_metadata.clear();
+			if (!g_cfg.video.debug_overlay)
+			{
+				return;
+			}
+
+			m_previous_frame_feedback_copy_metadata.reserve(m_temporary_subresource_cache.size());
+			for (const auto& entry : m_temporary_subresource_cache)
+			{
+				const auto& desc = entry.second.first;
+				if (!is_cross_frame_feedback_candidate(desc) || !desc.copied_content_generation)
+				{
+					continue;
+				}
+
+				const u64 logical_copy_bytes = get_feedback_copy_logical_bytes(desc);
+				m_previous_frame_feedback_copy_metadata.push_back(
+				{
+					.key = get_feedback_cross_frame_key(desc),
+					.copied_content_generation = desc.copied_content_generation,
+					.logical_copy_bytes = logical_copy_bytes,
+				});
+				m_feedback_copy_stats.cross_frame_prior_metadata_count++;
+				m_feedback_copy_stats.cross_frame_prior_metadata_bytes += logical_copy_bytes;
+			}
+		}
+
+		void record_feedback_copy_signature(const deferred_subresource& desc, u64 copied_bytes, u64 source_generation)
+		{
+			// This instrumentation exists only for explicit profiling runs. Keep the normal
+			// feedback-copy path to a single, predictable branch with no allocation.
+			if (!g_cfg.video.debug_overlay)
+			{
+				return;
+			}
+
+			framebuffer_feedback_copy_signature signature{};
+			signature.source_identity = static_cast<u64>(reinterpret_cast<uptr>(desc.source_content_tracker));
+			signature.request_address = desc.address;
+			signature.source_address = desc.external_ref_addr ? desc.external_ref_addr : desc.address;
+			signature.pitch = desc.pitch;
+			signature.gcm_format = desc.gcm_format;
+			signature.remap = desc.remap.encoded;
+			signature.x = desc.x;
+			signature.y = desc.y;
+			signature.width = desc.width;
+			signature.height = desc.height;
+			signature.depth = std::max<u16>(desc.depth, 1);
+			signature.bpp = std::max<u8>(desc.bpp, 1);
+			signature.op = desc.op;
+			signature.reason = desc.feedback_copy_reason;
+
+			bool is_same_frame_remap_duplicate = false;
+			framebuffer_feedback_copy_signature_entry* matching_entry = nullptr;
+			framebuffer_feedback_copy_signature_entry* empty_entry = nullptr;
+			framebuffer_feedback_copy_signature_entry* smallest_entry = &m_feedback_copy_signatures.front();
+
+			for (auto& entry : m_feedback_copy_signatures)
+			{
+				if (!entry.estimated_copies)
+				{
+					if (!empty_entry)
+					{
+						empty_entry = &entry;
+					}
+				}
+				else
+				{
+					if (entry.signature == signature)
+					{
+						matching_entry = &entry;
+					}
+
+					if (source_generation && entry.last_generation == source_generation &&
+						entry.last_copy_frame == m_feedback_stats_frame_count &&
+						entry.signature.remap != signature.remap &&
+						entry.signature.same_backing_ignoring_remap(signature))
+					{
+						is_same_frame_remap_duplicate = true;
+					}
+				}
+
+				if (entry.estimated_copied_bytes < smallest_entry->estimated_copied_bytes)
+				{
+					smallest_entry = &entry;
+				}
+			}
+
+			auto* entry = matching_entry ? matching_entry : empty_entry;
+			if (!entry)
+			{
+				// Space-Saving replacement keeps useful heavy hitters even if the scene has
+				// more unique copy signatures than this deliberately small fixed table.
+				entry = smallest_entry;
+				entry->copy_count_error = entry->estimated_copies;
+				entry->copied_bytes_error = entry->estimated_copied_bytes;
+				entry->remap_duplicate_copies = 0;
+				entry->remap_duplicate_bytes = 0;
+				entry->first_generation = 0;
+				entry->last_generation = 0;
+			}
+			else if (!matching_entry)
+			{
+				entry->copy_count_error = 0;
+				entry->copied_bytes_error = 0;
+			}
+
+			if (!matching_entry)
+			{
+				entry->signature = signature;
+			}
+
+			entry->estimated_copies++;
+			entry->estimated_copied_bytes += copied_bytes;
+			entry->last_copy_frame = m_feedback_stats_frame_count;
+
+			if (source_generation)
+			{
+				if (!entry->first_generation)
+				{
+					entry->first_generation = source_generation;
+				}
+
+				entry->last_generation = source_generation;
+			}
+
+			if (is_same_frame_remap_duplicate)
+			{
+				entry->remap_duplicate_copies++;
+				entry->remap_duplicate_bytes += copied_bytes;
+				m_feedback_copy_stats.same_frame_remap_duplicate_copies++;
+				m_feedback_copy_stats.same_frame_remap_duplicate_bytes += copied_bytes;
+			}
+		}
+
+		void report_feedback_copy_signatures()
+		{
+			const u64 now = get_system_time();
+			if (m_feedback_copy_signature_last_report_time_us &&
+				now - m_feedback_copy_signature_last_report_time_us < 1'000'000)
+			{
+				return;
+			}
+
+			m_feedback_copy_signature_last_report_time_us = now;
+
+			std::array<const framebuffer_feedback_copy_signature_entry*, m_feedback_copy_signature_capacity> sorted{};
+			usz count = 0;
+			for (const auto& entry : m_feedback_copy_signatures)
+			{
+				if (entry.estimated_copies)
+				{
+					sorted[count++] = &entry;
+				}
+			}
+
+			std::sort(sorted.begin(), sorted.begin() + count, [](const auto* lhs, const auto* rhs)
+			{
+				return lhs->estimated_copied_bytes > rhs->estimated_copied_bytes;
+			});
+
+			for (usz rank = 0; rank < std::min(count, m_feedback_copy_signature_report_count); ++rank)
+			{
+				const auto& entry = *sorted[rank];
+				const auto& signature = entry.signature;
+				rsx_log.notice("FBSTAT_SIG frames=%llu rank=%u reason=%s source=0x%08x request=0x%08x source_id=0x%llx region=%u,%u,%ux%ux%u pitch=%u bpp=%u format=0x%x op=%u remap=0x%08x copies_est=%llu copies_error=%llu copied_bytes_est=%llu copied_bytes_error=%llu generation_first=%llu generation_last=%llu remap_duplicate_copies=%llu remap_duplicate_bytes=%llu",
+					m_feedback_stats_frame_count, static_cast<u32>(rank + 1), get_feedback_copy_reason_name(signature.reason),
+					signature.source_address, signature.request_address, signature.source_identity,
+					signature.x, signature.y, signature.width, signature.height, signature.depth,
+					signature.pitch, signature.bpp, signature.gcm_format, static_cast<u32>(signature.op), signature.remap,
+					entry.estimated_copies, entry.copy_count_error, entry.estimated_copied_bytes, entry.copied_bytes_error,
+					entry.first_generation, entry.last_generation, entry.remap_duplicate_copies, entry.remap_duplicate_bytes);
+			}
+		}
 
 	public:
 		virtual void destroy() = 0;
@@ -1167,6 +1749,7 @@ namespace rsx
 		{
 			// Release objects used for frame data
 			on_frame_end();
+			m_previous_frame_feedback_copy_metadata.clear();
 
 			// Nuke the permanent storage pool
 			m_storage.clear();
@@ -1175,6 +1758,10 @@ namespace rsx
 
 		virtual void on_frame_end()
 		{
+			// Capture scalar metadata while the current-frame descriptors still exist.
+			// Views are released below and are deliberately never retained by the oracle.
+			snapshot_feedback_copy_metadata_for_next_frame();
+
 			// Must manually release each cached entry
 			for (auto& entry : m_temporary_subresource_cache)
 			{
@@ -1183,6 +1770,77 @@ namespace rsx
 
 			m_temporary_subresource_cache.clear();
 			m_predictor.on_frame_end();
+
+			auto& totals = m_feedback_copy_totals;
+			const auto& frame = m_feedback_copy_stats;
+			totals.requests += frame.requests;
+			totals.live_rop_requests += frame.live_rop_requests;
+			totals.edge_clamped_requests += frame.edge_clamped_requests;
+			totals.actual_copies += frame.actual_copies;
+			totals.new_snapshots += frame.new_snapshots;
+			totals.cache_refreshes += frame.cache_refreshes;
+			totals.generation_reuses += frame.generation_reuses;
+			totals.static_cache_hits += frame.static_cache_hits;
+			totals.uncached_copies += frame.uncached_copies;
+			totals.failures += frame.failures;
+			totals.logical_copied_bytes += frame.logical_copied_bytes;
+			totals.logical_reused_bytes += frame.logical_reused_bytes;
+			totals.same_frame_remap_duplicate_copies += frame.same_frame_remap_duplicate_copies;
+			totals.same_frame_remap_duplicate_bytes += frame.same_frame_remap_duplicate_bytes;
+			totals.cross_frame_structural_matches += frame.cross_frame_structural_matches;
+			totals.cross_frame_would_reuse += frame.cross_frame_would_reuse;
+			totals.cross_frame_would_refresh += frame.cross_frame_would_refresh;
+			totals.cross_frame_unknown_generation += frame.cross_frame_unknown_generation;
+			totals.cross_frame_would_reuse_bytes += frame.cross_frame_would_reuse_bytes;
+			totals.cross_frame_prior_metadata_count += frame.cross_frame_prior_metadata_count;
+			totals.cross_frame_prior_metadata_bytes += frame.cross_frame_prior_metadata_bytes;
+			totals.partial_oracle_candidates += frame.partial_oracle_candidates;
+			totals.partial_oracle_complete += frame.partial_oracle_complete;
+			totals.partial_oracle_zero_dirty += frame.partial_oracle_zero_dirty;
+			totals.partial_oracle_partial += frame.partial_oracle_partial;
+			totals.partial_oracle_full_coverage += frame.partial_oracle_full_coverage;
+			totals.partial_oracle_fallback_unknown += frame.partial_oracle_fallback_unknown;
+			totals.partial_oracle_fallback_overflow += frame.partial_oracle_fallback_overflow;
+			totals.partial_oracle_fallback_unavailable_or_gap += frame.partial_oracle_fallback_unavailable_or_gap;
+			totals.partial_oracle_write_events_examined += frame.partial_oracle_write_events_examined;
+			totals.partial_oracle_max_events_per_refresh = std::max(
+				totals.partial_oracle_max_events_per_refresh, frame.partial_oracle_max_events_per_refresh);
+			totals.partial_oracle_full_candidate_bytes += frame.partial_oracle_full_candidate_bytes;
+			totals.partial_oracle_hypothetical_union_bytes += frame.partial_oracle_hypothetical_union_bytes;
+			totals.partial_oracle_hypothetical_bbox_bytes += frame.partial_oracle_hypothetical_bbox_bytes;
+
+			++m_feedback_stats_frame_count;
+			if (g_cfg.video.debug_overlay && (m_feedback_stats_frame_count % 10) == 0)
+			{
+				rsx_log.notice("FBSTAT frames=%llu requests=%llu live=%llu edge=%llu copies=%llu new_snapshots=%llu refreshes=%llu uncached=%llu generation_reuses=%llu static_hits=%llu failures=%llu logical_copied_bytes=%llu logical_reused_bytes=%llu same_frame_remap_duplicate_copies=%llu same_frame_remap_duplicate_bytes=%llu cross_frame_structural_matches=%llu cross_frame_would_reuse=%llu cross_frame_would_refresh=%llu cross_frame_unknown_generation=%llu cross_frame_would_reuse_bytes=%llu cross_frame_prior_metadata_count=%llu cross_frame_prior_metadata_bytes=%llu",
+					m_feedback_stats_frame_count, totals.requests, totals.live_rop_requests, totals.edge_clamped_requests,
+					totals.actual_copies, totals.new_snapshots, totals.cache_refreshes, totals.uncached_copies,
+					totals.generation_reuses, totals.static_cache_hits, totals.failures,
+					totals.logical_copied_bytes, totals.logical_reused_bytes,
+					totals.same_frame_remap_duplicate_copies, totals.same_frame_remap_duplicate_bytes,
+					totals.cross_frame_structural_matches, totals.cross_frame_would_reuse,
+					totals.cross_frame_would_refresh, totals.cross_frame_unknown_generation,
+					totals.cross_frame_would_reuse_bytes, totals.cross_frame_prior_metadata_count,
+					totals.cross_frame_prior_metadata_bytes);
+
+				rsx_log.notice("FBSTAT_DIRTY frames=%llu candidates=%llu complete=%llu zero_dirty=%llu partial=%llu full_coverage=%llu fallback_unknown=%llu fallback_overflow=%llu fallback_unavailable_or_gap=%llu write_events_examined=%llu max_events_per_refresh=%llu full_candidate_bytes=%llu hypothetical_union_bytes=%llu hypothetical_bbox_bytes=%llu",
+					m_feedback_stats_frame_count, totals.partial_oracle_candidates,
+					totals.partial_oracle_complete, totals.partial_oracle_zero_dirty,
+					totals.partial_oracle_partial, totals.partial_oracle_full_coverage,
+					totals.partial_oracle_fallback_unknown, totals.partial_oracle_fallback_overflow,
+					totals.partial_oracle_fallback_unavailable_or_gap,
+					totals.partial_oracle_write_events_examined,
+					totals.partial_oracle_max_events_per_refresh,
+					totals.partial_oracle_full_candidate_bytes,
+					totals.partial_oracle_hypothetical_union_bytes,
+					totals.partial_oracle_hypothetical_bbox_bytes);
+			}
+
+			if (g_cfg.video.debug_overlay)
+			{
+				report_feedback_copy_signatures();
+			}
+
 			reset_frame_statistics();
 		}
 
@@ -1700,25 +2358,94 @@ namespace rsx
 
 		image_view_type create_temporary_subresource(commandbuffer_type &cmd, deferred_subresource& desc)
 		{
+			const bool is_feedback_copy = desc.feedback_copy_reason != framebuffer_feedback_copy_reason::none;
+			const bool is_dynamic_copy = desc.op == deferred_request_command::copy_image_dynamic;
+			const bool is_feedback_profile_enabled = is_feedback_copy && g_cfg.video.debug_overlay;
+			const bool is_partial_refresh_profile_enabled = g_cfg.video.debug_overlay &&
+				is_partial_refresh_oracle_candidate(desc);
+			if (is_partial_refresh_profile_enabled)
+			{
+				desc.source_content_tracker->enable_content_write_journal();
+			}
+
+			const u64 logical_copy_bytes = get_feedback_copy_logical_bytes(desc);
+			const u64 source_content_generation = is_feedback_copy && desc.source_content_tracker &&
+				(is_dynamic_copy || is_feedback_profile_enabled)
+				? desc.source_content_tracker->get_content_generation()
+				: 0;
+
+			if (is_feedback_copy)
+			{
+				m_feedback_copy_stats.requests++;
+
+				switch (desc.feedback_copy_reason)
+				{
+				case framebuffer_feedback_copy_reason::live_rop:
+					m_feedback_copy_stats.live_rop_requests++;
+					break;
+				case framebuffer_feedback_copy_reason::edge_clamped_merge:
+					m_feedback_copy_stats.edge_clamped_requests++;
+					break;
+				default:
+					break;
+				}
+			}
+
 			if (!desc.do_not_cache) [[likely]]
 			{
 				const auto found = m_temporary_subresource_cache.equal_range(desc.address);
 				for (auto It = found.first; It != found.second; ++It)
 				{
-					const auto& found_desc = It->second.first;
+					auto& found_desc = It->second.first;
 					if (found_desc.external_handle != desc.external_handle ||
 						found_desc.op != desc.op ||
+						found_desc.source_content_tracker != desc.source_content_tracker ||
 						found_desc.x != desc.x || found_desc.y != desc.y ||
 						found_desc.width != desc.width || found_desc.height != desc.height ||
-						found_desc.gcm_format != desc.gcm_format)
+						found_desc.gcm_format != desc.gcm_format ||
+						found_desc.remap.encoded != desc.remap.encoded)
 						continue;
 
-					if (desc.op == deferred_request_command::copy_image_dynamic)
-						update_image_contents(cmd, It->second.second, desc.external_handle, desc.width, desc.height);
+					if (is_dynamic_copy)
+					{
+						if (is_feedback_copy && source_content_generation &&
+							found_desc.copied_content_generation == source_content_generation)
+						{
+							m_feedback_copy_stats.generation_reuses++;
+							m_feedback_copy_stats.logical_reused_bytes += logical_copy_bytes;
+						}
+						else
+						{
+							if (is_partial_refresh_profile_enabled)
+							{
+								record_partial_refresh_oracle(desc, found_desc.copied_content_generation,
+									source_content_generation, logical_copy_bytes);
+							}
+
+							update_image_contents(cmd, It->second.second, desc);
+							found_desc.copied_content_generation = source_content_generation;
+
+							if (is_feedback_copy)
+							{
+								m_feedback_copy_stats.actual_copies++;
+								m_feedback_copy_stats.cache_refreshes++;
+								m_feedback_copy_stats.logical_copied_bytes += logical_copy_bytes;
+								record_feedback_copy_signature(desc, logical_copy_bytes, source_content_generation);
+							}
+						}
+					}
+					else if (is_feedback_copy)
+					{
+						m_feedback_copy_stats.static_cache_hits++;
+					}
 
 					return It->second.second;
 				}
 			}
+
+			// A production cross-frame cache could only be consulted once the ordinary
+			// current-frame cache misses. This debug oracle follows the same ordering.
+			probe_previous_frame_feedback_copy(desc, source_content_generation);
 
 			std::lock_guard lock(m_cache_mutex);
 			image_view_type result = 0;
@@ -1828,14 +2555,33 @@ namespace rsx
 
 			if (result) [[likely]]
 			{
+				if (is_feedback_copy)
+				{
+					m_feedback_copy_stats.actual_copies++;
+					m_feedback_copy_stats.new_snapshots++;
+					m_feedback_copy_stats.logical_copied_bytes += logical_copy_bytes;
+					record_feedback_copy_signature(desc, logical_copy_bytes, source_content_generation);
+
+					if (desc.do_not_cache)
+					{
+						m_feedback_copy_stats.uncached_copies++;
+					}
+				}
+
 				if (!desc.do_not_cache) [[likely]]
 				{
-					m_temporary_subresource_cache.insert({ desc.address,{ desc, result } });
+					auto cached_desc = desc;
+					cached_desc.copied_content_generation = source_content_generation;
+					m_temporary_subresource_cache.insert({ desc.address,{ std::move(cached_desc), result } });
 				}
 				else
 				{
 					m_uncached_subresources.push_back(result);
 				}
+			}
+			else if (is_feedback_copy)
+			{
+				m_feedback_copy_stats.failures++;
 			}
 
 			return result;
@@ -1864,6 +2610,27 @@ namespace rsx
 				else
 				{
 					++It;
+				}
+			}
+
+			if (!g_cfg.video.debug_overlay)
+			{
+				m_previous_frame_feedback_copy_metadata.clear();
+				return;
+			}
+
+			// Match the lifetime rule of the real temporary cache: invalidating an
+			// overlapping RSX range also invalidates its prior-frame oracle metadata.
+			for (auto it = m_previous_frame_feedback_copy_metadata.begin();
+				it != m_previous_frame_feedback_copy_metadata.end();)
+			{
+				if (it->key.cache_range.valid() && range.overlaps(it->key.cache_range))
+				{
+					it = m_previous_frame_feedback_copy_metadata.erase(it);
+				}
+				else
+				{
+					++it;
 				}
 			}
 		}
@@ -2067,6 +2834,11 @@ namespace rsx
 					(result.external_subresource_desc.op == deferred_request_command::copy_image_static) ||
 					(result.external_subresource_desc.op == deferred_request_command::copy_image_dynamic) ||
 					(result.external_subresource_desc.op == deferred_request_command::blit_image_static);
+				const bool feedback_copy_required =
+					attr.edge_clamped &&
+					g_cfg.video.avoid_framebuffer_feedback_loops() &&
+					is_simple_subresource_copy &&
+					render_target_format_is_compatible(result.external_subresource_desc.src0(), attr.gcm_format);
 
 				if (attr.edge_clamped &&
 					!g_cfg.video.avoid_framebuffer_feedback_loops() &&
@@ -2099,6 +2871,16 @@ namespace rsx
 					}
 
 					return result;
+				}
+
+				if (feedback_copy_required)
+				{
+					result.external_subresource_desc.feedback_copy_reason = framebuffer_feedback_copy_reason::edge_clamped_merge;
+
+					if (const auto ref_addr = result.external_subresource_desc.external_ref_addr)
+					{
+						result.external_subresource_desc.source_content_tracker = m_rtts.get_surface_at(ref_addr);
+					}
 				}
 
 				if (options.skip_texture_merge)
@@ -3566,6 +4348,7 @@ namespace rsx
 			m_texture_upload_calls_this_frame.store(0u);
 			m_texture_upload_misses_this_frame.store(0u);
 			m_texture_copies_ellided_this_frame.store(0u);
+			m_feedback_copy_stats = {};
 		}
 
 		void on_flush()
@@ -3652,6 +4435,11 @@ namespace rsx
 		u32 get_texture_copies_ellided_this_frame() const
 		{
 			return m_texture_copies_ellided_this_frame;
+		}
+
+		framebuffer_feedback_copy_statistics get_framebuffer_feedback_copy_statistics() const
+		{
+			return m_feedback_copy_stats;
 		}
 	};
 }

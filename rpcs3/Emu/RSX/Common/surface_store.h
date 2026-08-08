@@ -1257,10 +1257,43 @@ namespace rsx
 			}
 		}
 
-		void on_write(const std::array<bool, 4>& color_mrt_writes_enabled, const bool depth_stencil_writes_enabled)
+		template <typename WriteNotifier>
+		void on_write(const std::array<bool, 4>& color_mrt_writes_enabled,
+			const bool depth_stencil_writes_enabled, WriteNotifier&& write_notifier)
 		{
+			const auto record_write = [&](surface_type surface, auto&& write_operation)
+			{
+				const u64 before = surface->get_content_generation();
+				write_operation();
+				write_notifier(surface, before, surface->get_content_generation());
+			};
+
 			if (write_tag >= cache_tag && !m_invalidate_on_write)
 			{
+				// The age/coherency metadata is already current, but the draw still changed
+				// the enabled attachments. Content generations must track every write so a
+				// sampled snapshot is never reused after a later draw.
+				for (const auto& i : m_bound_render_target_ids)
+				{
+					if (color_mrt_writes_enabled[i])
+					{
+						auto surface = m_bound_render_targets[i].second;
+						record_write(surface, [&]
+						{
+							surface->mark_content_written();
+						});
+					}
+				}
+
+				if (auto zsurface = m_bound_depth_stencil.second;
+					zsurface && depth_stencil_writes_enabled)
+				{
+					record_write(zsurface, [&]
+					{
+						zsurface->mark_content_written();
+					});
+				}
+
 				return;
 			}
 
@@ -1274,11 +1307,17 @@ namespace rsx
 					auto surface = m_bound_render_targets[i].second;
 					if (surface->last_use_tag > cache_tag) [[ likely ]]
 					{
-						surface->on_write_fast(write_tag);
+						record_write(surface, [&]
+						{
+							surface->on_write_fast(write_tag);
+						});
 					}
 					else
 					{
-						surface->on_write(write_tag, rsx::surface_state_flags::require_resolve, m_active_raster_type);
+						record_write(surface, [&]
+						{
+							surface->on_write(write_tag, rsx::surface_state_flags::require_resolve, m_active_raster_type);
+						});
 					}
 				}
 			}
@@ -1288,13 +1327,25 @@ namespace rsx
 			{
 				if (zsurface->last_use_tag > cache_tag) [[ likely ]]
 				{
-					zsurface->on_write_fast(write_tag);
+					record_write(zsurface, [&]
+					{
+						zsurface->on_write_fast(write_tag);
+					});
 				}
 				else
 				{
-					zsurface->on_write(write_tag, rsx::surface_state_flags::require_resolve, m_active_raster_type);
+					record_write(zsurface, [&]
+					{
+						zsurface->on_write(write_tag, rsx::surface_state_flags::require_resolve, m_active_raster_type);
+					});
 				}
 			}
+		}
+
+		void on_write(const std::array<bool, 4>& color_mrt_writes_enabled, const bool depth_stencil_writes_enabled)
+		{
+			on_write(color_mrt_writes_enabled, depth_stencil_writes_enabled,
+				[](surface_type, u64, u64) {});
 		}
 
 		void invalidate_all()
@@ -1330,6 +1381,7 @@ namespace rsx
 				auto& rtt = it->second;
 				if (range.overlaps(rtt->get_memory_range()))
 				{
+					rtt->mark_content_written();
 					rtt->clear_rw_barrier();
 					rtt->state_flags |= rsx::surface_state_flags::erase_bkgnd;
 				}
@@ -1340,6 +1392,7 @@ namespace rsx
 				auto& ds = it->second;
 				if (range.overlaps(ds->get_memory_range()))
 				{
+					ds->mark_content_written();
 					ds->clear_rw_barrier();
 					ds->state_flags |= rsx::surface_state_flags::erase_bkgnd;
 				}

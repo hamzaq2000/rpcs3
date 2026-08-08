@@ -31,6 +31,31 @@ namespace rsx
 		full
 	};
 
+	// Half-open host-pixel rectangle written to a render target. This is used only
+	// by the framebuffer-feedback profiling oracle; it does not affect rendering.
+	struct surface_content_write_rect
+	{
+		u32 x1 = 0;
+		u32 y1 = 0;
+		u32 x2 = 0;
+		u32 y2 = 0;
+
+		bool valid() const
+		{
+			return x1 < x2 && y1 < y2;
+		}
+	};
+
+	enum class surface_content_history_status : u8
+	{
+		complete,
+		unavailable,
+		unknown_or_full,
+		overflow,
+		broken_chain,
+		generation_mismatch,
+	};
+
 	template <typename surface_type>
 	struct surface_overlap_info_t
 	{
@@ -123,8 +148,180 @@ namespace rsx
 		}
 	};
 
+	struct surface_content_tracker
+	{
+	private:
+		u64 m_content_generation = 0;
+
+		struct content_write_event
+		{
+			u64 before = 0;
+			u64 after = 0;
+			surface_content_write_rect rect{};
+			bool exact = false;
+		};
+
+		struct content_write_journal
+		{
+			static constexpr u32 capacity = 64;
+
+			std::array<content_write_event, capacity> events{};
+			u32 first = 0;
+			u32 count = 0;
+			bool overflowed = false;
+		};
+
+		// Most surfaces never participate in the debug oracle, so keep the fixed
+		// ring itself lazily allocated. Once enabled, every generation transition is
+		// recorded conservatively until an eligible draw refines it below.
+		mutable std::unique_ptr<content_write_journal> m_content_write_journal;
+
+	public:
+		u64 mark_content_written()
+		{
+			const u64 before = m_content_generation;
+
+			// Keep zero reserved for resources whose content generation is unknown.
+			if (++m_content_generation == 0)
+			{
+				++m_content_generation;
+			}
+
+			if (auto* journal = m_content_write_journal.get())
+			{
+				u32 index;
+				if (journal->count < content_write_journal::capacity)
+				{
+					index = (journal->first + journal->count) % content_write_journal::capacity;
+					journal->count++;
+				}
+				else
+				{
+					index = journal->first;
+					journal->first = (journal->first + 1) % content_write_journal::capacity;
+					journal->overflowed = true;
+				}
+
+				journal->events[index] =
+				{
+					.before = before,
+					.after = m_content_generation,
+				};
+			}
+
+			return m_content_generation;
+		}
+
+		u64 get_content_generation() const
+		{
+			return m_content_generation;
+		}
+
+		void enable_content_write_journal() const
+		{
+			if (!m_content_write_journal)
+			{
+				m_content_write_journal = std::make_unique<content_write_journal>();
+			}
+		}
+
+		bool refine_last_content_write(u64 before, u64 after, const surface_content_write_rect& rect)
+		{
+			auto* journal = m_content_write_journal.get();
+			if (!journal || !journal->count || !rect.valid())
+			{
+				return false;
+			}
+
+			const u32 index = (journal->first + journal->count - 1) % content_write_journal::capacity;
+			auto& event = journal->events[index];
+			if (event.before != before || event.after != after)
+			{
+				return false;
+			}
+
+			event.rect = rect;
+			event.exact = true;
+			return true;
+		}
+
+		template <typename Visitor>
+		surface_content_history_status visit_content_writes(
+			u64 from, u64 through, Visitor&& visitor, u32* visited = nullptr) const
+		{
+			if (visited)
+			{
+				*visited = 0;
+			}
+
+			if (!from || !through || through != m_content_generation)
+			{
+				return surface_content_history_status::generation_mismatch;
+			}
+
+			if (from == through)
+			{
+				return surface_content_history_status::complete;
+			}
+
+			const auto* journal = m_content_write_journal.get();
+			if (!journal || !journal->count)
+			{
+				return surface_content_history_status::unavailable;
+			}
+
+			u32 offset = 0;
+			for (; offset < journal->count; ++offset)
+			{
+				const u32 index = (journal->first + offset) % content_write_journal::capacity;
+				if (journal->events[index].before == from)
+				{
+					break;
+				}
+			}
+
+			if (offset == journal->count)
+			{
+				return journal->overflowed
+					? surface_content_history_status::overflow
+					: surface_content_history_status::unavailable;
+			}
+
+			u64 expected = from;
+			for (; offset < journal->count; ++offset)
+			{
+				const u32 index = (journal->first + offset) % content_write_journal::capacity;
+				const auto& event = journal->events[index];
+
+				if (event.before != expected)
+				{
+					return surface_content_history_status::broken_chain;
+				}
+
+				if (visited)
+				{
+					++*visited;
+				}
+
+				if (!event.exact)
+				{
+					return surface_content_history_status::unknown_or_full;
+				}
+
+				visitor(event.rect);
+				expected = event.after;
+				if (expected == through)
+				{
+					return surface_content_history_status::complete;
+				}
+			}
+
+			return surface_content_history_status::broken_chain;
+		}
+	};
+
 	template <typename image_storage_type>
-	struct render_target_descriptor : public rsx::ref_counted
+	struct render_target_descriptor : public rsx::ref_counted, public surface_content_tracker
 	{
 		u64 last_use_tag = 0;         // tag indicating when this block was last confirmed to have been written to
 		u32 base_addr = 0;
@@ -375,6 +572,7 @@ namespace rsx
 		{
 			ensure(native_pitch);
 			ensure(rsx_pitch);
+			mark_content_written();
 
 			base_addr = address;
 
@@ -403,6 +601,7 @@ namespace rsx
 		{
 			ensure(native_pitch);
 			ensure(rsx_pitch);
+			mark_content_written();
 
 			// Clear metadata
 			reset();
@@ -463,6 +662,7 @@ namespace rsx
 		void invalidate_GPU_memory()
 		{
 			// Here be dragons. Use with caution.
+			mark_content_written();
 			shuffle_tag();
 			state_flags |= rsx::surface_state_flags::erase_bkgnd;
 		}
@@ -518,6 +718,8 @@ namespace rsx
 				return;
 			}
 
+			mark_content_written();
+
 			old_contents.emplace_back();
 			old_contents.back().source = other;
 			other->add_ref();
@@ -529,6 +731,7 @@ namespace rsx
 			// NOTE: This method will not perform pitch verification!
 			ensure(region.source);
 			ensure(region.source != static_cast<decltype(region.source)>(this));
+			mark_content_written();
 
 			old_contents.push_back(region.template cast<image_storage_type>());
 			auto &slice = old_contents.back();
@@ -616,6 +819,8 @@ namespace rsx
 			rsx::surface_state_flags resolve_flags = surface_state_flags::require_resolve,
 			surface_raster_type type = rsx::surface_raster_type::undefined)
 		{
+			mark_content_written();
+
 			if (write_tag)
 			{
 				// Update use tag if requested
@@ -660,6 +865,7 @@ namespace rsx
 		inline void on_write_fast(u64 write_tag)
 		{
 			ensure(write_tag);
+			mark_content_written();
 			last_use_tag = write_tag;
 
 			if (spp > 1 && sample_layout != surface_sample_layout::null)
@@ -776,6 +982,8 @@ namespace rsx
 
 		void on_clone_from(const render_target_descriptor* ref)
 		{
+			mark_content_written();
+
 			if (ref->is_locked() && !is_locked())
 			{
 				// Propagate locked state only.

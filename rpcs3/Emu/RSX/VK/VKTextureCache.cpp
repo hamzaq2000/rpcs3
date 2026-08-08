@@ -977,16 +977,18 @@ namespace vk
 			dst->aspect(), *vk::get_upload_heap(), desc.pitch, vk::upload_contents_inline);
 	}
 
-	void texture_cache::update_image_contents(vk::command_buffer& cmd, vk::image_view* dst_view, vk::image* src, u16 width, u16 height)
+	void texture_cache::update_image_contents(vk::command_buffer& cmd, vk::image_view* dst_view, const deferred_subresource& desc)
 	{
 		rsx::simple_array<copy_region_descriptor> region =
 		{ {
-			.src = src,
-			.xform = rsx::surface_transform::identity,
-			.src_w = width,
-			.src_h = height,
-			.dst_w = width,
-			.dst_h = height
+			.src = desc.external_handle,
+			.xform = rsx::surface_transform::coordinate_transform,
+			.src_x = desc.x,
+			.src_y = desc.y,
+			.src_w = desc.width,
+			.src_h = desc.height,
+			.dst_w = desc.width,
+			.dst_h = desc.height
 		} };
 
 		auto dst = dst_view->image();

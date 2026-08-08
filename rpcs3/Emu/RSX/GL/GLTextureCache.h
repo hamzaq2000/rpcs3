@@ -649,16 +649,18 @@ namespace gl
 			}
 		}
 
-		void update_image_contents(gl::command_context& cmd, gl::texture_view* dst, gl::texture* src, u16 width, u16 height) override
+		void update_image_contents(gl::command_context& cmd, gl::texture_view* dst, const deferred_subresource& desc) override
 		{
 			rsx::simple_array<copy_region_descriptor> region =
 			{{
-				.src = src,
-				.xform = rsx::surface_transform::identity,
-				.src_w = width,
-				.src_h = height,
-				.dst_w = width,
-				.dst_h = height
+				.src = desc.external_handle,
+				.xform = rsx::surface_transform::coordinate_transform,
+				.src_x = desc.x,
+				.src_y = desc.y,
+				.src_w = desc.width,
+				.src_h = desc.height,
+				.dst_w = desc.width,
+				.dst_h = desc.height
 			}};
 
 			copy_transfer_regions_impl(cmd, dst->image(), region);

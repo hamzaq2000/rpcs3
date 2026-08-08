@@ -46,6 +46,13 @@ namespace rsx
 		blit_image_static,        // Variant of the copy command that does scaling instead of copying
 	};
 
+	enum class framebuffer_feedback_copy_reason : u8
+	{
+		none,
+		live_rop,
+		edge_clamped_merge,
+	};
+
 	struct blit_op_result
 	{
 		bool succeeded = false;
@@ -691,6 +698,7 @@ namespace rsx
 
 				// A GPU operation must be performed on the data before sampling. Implies transfer_read access.
 				bool requires_processing = force_convert;
+				bool feedback_copy_required = false;
 				// A GPU clip operation may be performed by combining texture coordinate scaling with a clamp.
 				bool requires_clip = false;
 
@@ -714,6 +722,7 @@ namespace rsx
 					// Framebuffer feedback avoidance. For MSAA, we do not need to make copies; just use the resolve target
 					if (texptr->samples() == 1)
 					{
+						feedback_copy_required = !requires_processing && g_cfg.video.avoid_framebuffer_feedback_loops();
 						requires_processing = true;
 					}
 					else if (!requires_processing)
@@ -729,9 +738,18 @@ namespace rsx
 					const auto command = surface_is_rop_target ? deferred_request_command::copy_image_dynamic : deferred_request_command::copy_image_static;
 
 					texptr->memory_barrier(cmd, rsx::surface_access::transfer_read);
-					return { texptr->get_surface(rsx::surface_access::transfer_read), command, attr2, {},
+					sampled_image_descriptor result = { texptr->get_surface(rsx::surface_access::transfer_read), command, attr2, {},
 							texture_upload_context::framebuffer_storage, format_class, scale,
 							extended_dimension, decoded_remap };
+
+					if (feedback_copy_required)
+					{
+						result.external_subresource_desc.feedback_copy_reason = framebuffer_feedback_copy_reason::live_rop;
+					}
+
+					result.external_subresource_desc.source_content_tracker = texptr;
+
+					return result;
 				}
 
 				texptr->memory_barrier(cmd, access_type);

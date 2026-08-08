@@ -1362,7 +1362,50 @@ void VKGSRender::end()
 		m_current_command_buffer->flags &= ~(vk::command_buffer::cb_has_conditional_render);
 	}
 
-	m_rtts.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled);
+	if (g_cfg.video.debug_overlay)
+	{
+		// The feedback-copy dirty-region oracle consumes host-pixel rectangles.
+		// Vulkan's effective scissor is already viewport-clipped and resolution-
+		// scaled, so it is a conservative bound for this draw. Keep multisampled
+		// surfaces unknown until their logical/sample coordinate mapping is modeled.
+		m_rtts.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled,
+			[&](auto surface, u64 before, u64 after)
+			{
+				if (surface->get_spp() != 1)
+				{
+					return;
+				}
+
+				const u32 surface_width = surface->width();
+				const u32 surface_height = surface->height();
+				const s64 raw_x1 = m_scissor.offset.x;
+				const s64 raw_y1 = m_scissor.offset.y;
+				const s64 raw_x2 = raw_x1 + static_cast<s64>(m_scissor.extent.width);
+				const s64 raw_y2 = raw_y1 + static_cast<s64>(m_scissor.extent.height);
+				const auto clamp_axis = [](s64 value, u32 limit)
+				{
+					return value <= 0 ? 0u :
+						value >= static_cast<s64>(limit) ? limit : static_cast<u32>(value);
+				};
+
+				const rsx::surface_content_write_rect rect
+				{
+					.x1 = clamp_axis(raw_x1, surface_width),
+					.y1 = clamp_axis(raw_y1, surface_height),
+					.x2 = clamp_axis(raw_x2, surface_width),
+					.y2 = clamp_axis(raw_y2, surface_height),
+				};
+
+				if (rect.valid())
+				{
+					surface->refine_last_content_write(before, after, rect);
+				}
+			});
+	}
+	else
+	{
+		m_rtts.on_write(m_framebuffer_layout.color_write_enabled, m_framebuffer_layout.zeta_write_enabled);
+	}
 
 	rsx::thread::end();
 }

@@ -456,6 +456,7 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 		const auto num_texture_upload_miss = m_gl_texture_cache.get_texture_upload_misses_this_frame();
 		const auto texture_upload_miss_ratio = m_gl_texture_cache.get_texture_upload_miss_percentage();
 		const auto texture_copies_ellided = m_gl_texture_cache.get_texture_copies_ellided_this_frame();
+		const auto feedback_copies = m_gl_texture_cache.get_framebuffer_feedback_copy_statistics();
 		const auto vertex_cache_hit_count = (info.stats.vertex_cache_request_count - info.stats.vertex_cache_miss_count);
 		const auto vertex_cache_hit_ratio = info.stats.vertex_cache_request_count
 			? (vertex_cache_hit_count * 100) / info.stats.vertex_cache_request_count
@@ -478,6 +479,7 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 			"Texture memory: %12dM\n"
 			"Flush requests: %12d  = %2d (%3d%%) hard faults, %2d unavoidable, %2d misprediction(s), %2d speculation(s)\n"
 			"Texture uploads: %11u (%u from CPU - %02u%%, %u copies avoided)\n"
+			"Feedback copies: %10u req (%u live, %u edge), %u copies (%u new, %u refresh, %u uncached), %u generation reuse, %u static hits; %llu/%llu KiB logical copy/reuse\n"
 			"Vertex cache hits: %9u/%u (%u%%)\n"
 			"Program cache lookup ellision: %u/%u (%u%%)",
 			info.stats.framebuffer_stats.to_string(resolution_scaling_config, !backend_config.supports_hw_msaa),
@@ -485,6 +487,11 @@ void GLGSRender::flip(const rsx::display_flip_info_t& info)
 			info.stats.textures_upload_time, info.stats.draw_exec_time, num_dirty_textures, texture_memory_size,
 			num_flushes, num_misses, cache_miss_ratio, num_unavoidable, num_mispredict, num_speculate,
 			num_texture_upload, num_texture_upload_miss, texture_upload_miss_ratio, texture_copies_ellided,
+			feedback_copies.requests, feedback_copies.live_rop_requests, feedback_copies.edge_clamped_requests,
+			feedback_copies.actual_copies, feedback_copies.new_snapshots, feedback_copies.cache_refreshes,
+			feedback_copies.uncached_copies, feedback_copies.generation_reuses,
+			feedback_copies.static_cache_hits,
+			feedback_copies.logical_copied_bytes / 1024, feedback_copies.logical_reused_bytes / 1024,
 			vertex_cache_hit_count, info.stats.vertex_cache_request_count, vertex_cache_hit_ratio,
 			program_cache_ellided, program_cache_lookups, program_cache_ellision_rate)
 		);
