@@ -4,7 +4,9 @@ This document records the architecture-level performance direction selected
 after the 2026-08-08 bedroom capture. It is a hypothesis with explicit causal
 gates, not a promise that the base M3 will reach 30 FPS. The first live oracle
 result is preserved in
-[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md).
+[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md); the
+valid oracle-v2 result and exact artifact identity are in
+[`FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`](FAULT_ORACLE_V2_CAPTURE_E0BE3532.md).
 
 ## Why this is the leading CPU-side target
 
@@ -26,8 +28,8 @@ renderer workaround's roughly 703 MiB/frame of GPU-to-GPU framebuffer
 snapshots.
 
 The first diagnostic timed every MFC submission. At 3.57 million calls per
-second that timer is itself perturbative, despite cache-line sharding. Remove
-or sparsely sample it before the next attribution capture. The lower-rate
+second that timer was itself perturbative despite cache-line sharding, so
+`18092fc7c` removed it before the fault-oracle captures. The lower-rate
 handled-fault, flush, readback, and byte counters remain useful.
 
 ## Current architectural coupling
@@ -61,10 +63,12 @@ Commit `5670a849f` preserves the exact-MFC-timer arm. Commit `18092fc7c`
 removes that 3.57-million-calls/s timer and retains the lower-rate ledger plus a
 single relaxed enable check on each executed MFC transfer. The first live
 capture exercised the observer but did not include an adjacent overlay-off
-control. Oracle v2 must compare otherwise identical overlay-on and overlay-off
-windows. Reject or redesign the observer if throughput changes by more than
-3--5%, pacing changes materially, or faults per frame move by more than about
-3%.
+control. The v2 capture closes the mechanism-attribution gates but remains an
+overlay-on diagnostic, so its 18.1606 FPS is not an observer-cost claim. Do not
+repeat bedroom profiling solely to perfect that control. Disable the oracle in
+production timing builds and use an overlay-off A/B once the exact-ticket
+prototype can change an outcome; reject the prototype if the A/B merely moves
+time into MFC/channel waits.
 
 ## Phase 1: fault-side causal ring
 
@@ -90,9 +94,9 @@ roughly 224 confirmed faults per second in a fixed, preallocated, signal-safe
 
 The signal handler performs no allocation or logging. It publishes fixed event
 records, and the RSX frame-end path emits cumulative `CELLSTAT` plus one-second
-`CELLFAULT_SUM` and bounded `CELLFAULT_TOP` aggregates. Multiple selected
-readback sections deliberately become `multi_unknown`; unknown or ambiguous
-cases never alter the existing fallback.
+`CELLFAULT_SUM` and bounded `CELLFAULT_TOP` aggregates. In oracle v1, multiple
+selected readback sections deliberately became `multi_unknown`; unknown or
+ambiguous cases never altered the existing fallback.
 
 A capture is invalid for causal percentages when ring drops or signature
 overflow are nonzero, or when section overflow/mismatch, missing MFC context,
@@ -138,25 +142,50 @@ Require zero aggregate-ring loss, zero untracked semantic sites, at least 95%
 containing MFC context on SPU handled faults, and no unexplained section or
 offloader cases before using site shares to select a policy.
 
-## Phase 2: logical coherence directory and exact access ticket
+The preserved `e0be35322` run passes those gates. Its exact interior contains
+1,254 frames in 69.051046 seconds. Ring/site loss, missing or non-containing MFC
+context, section overflow/mismatch/pairing error, out-of-range readback, and
+offloader/ZCULL attribution are all zero. All 14,615 SPU faults have a
+containing MFC interval. Per frame, the run records one PPU and 11.655 SPU
+faults, four fault-attached of six global readbacks, 14.990 ms of aggregate
+flush wait, and 14.943 ms of global GPU/readback wait.
 
-If the oracle confirms a useful pattern, separate logical ownership from trap
+The exact relations select two general mechanisms. First, the small list GET
+causes one 230,400-byte non-overlapping sibling readback per frame in aggregate,
+solely through native-page collateral. In 1,250 frames it is paired with the
+requested section in one two-section fault; four frames split the two readbacks
+across eight one-section faults. Second, two semantic list-GET classes take
+6.65 no-readback faults per frame and 73.65% of all flush wait after the
+relevant data are already synchronized. This clears the implementation gate:
+no additional bedroom-only attribution pass is required before phase 2.
+
+## Phase 2: generation-keyed logical directory, shadow, and exact GET ticket
+
+Separate logical ownership and synchronized content state from trap
 granularity:
 
-- Track exact section ranges with conservative 4 KiB read/write conflict bits.
+- Track exact section ranges with conservative 4 KiB read/write conflict bits,
+  RSX content generation, CPU-shadow synchronization generation, and lifetime
+  epoch.
 - Maintain a native-16-KiB summary only as the hot negative lookup hint. One
   normal MFC command is at most 16 KiB, so the common path should inspect at
   most two summaries and perform no map scan, allocation, or renderer call.
 - Protect directory lifetime with an epoch/refcount scheme and update it on
   section protection, resize, discard, flush, unmap, reuse, and ZCULL changes.
   A stale false negative would silently corrupt guest memory.
+- Publish a CPU-visible shadow only after exact intersecting sections are
+  synchronized. Its generation is reusable by later readers until the RSX
+  content generation changes; publication and invalidation must be ordered with
+  the same ownership transition.
 
-An RAII `cell_access_ticket{EA, size, direction}` then either:
+An RAII `cell_get_ticket{EA, size, tag/barrier state}` then either:
 
 1. returns the normal base pointer when no protected native page is involved;
-2. resolves and pins exact logical owners, synchronizes only required sections,
-   and returns the sudo alias; or
-3. falls back unchanged when the epoch changes or semantics are unsupported.
+2. resolves and pins exact logical owners, uses an already-synchronized shadow
+   for the required generation, and returns exact bytes through the safe alias;
+3. synchronizes only exact stale-generation owners, publishes that shadow once,
+   and then returns the exact bytes; or
+4. falls back unchanged when the epoch changes or semantics are unsupported.
 
 Same-native-page sibling sections are keepers: they remain logically owned and
 physically protected while exact requested bytes are accessed through the sudo
@@ -164,12 +193,18 @@ alias. Simply enabling strict bounds in the current invalidator is unsafe
 because non-target siblings can be erased from the re-protection plan. Partial
 PUTs must preserve untouched GPU-owned bytes.
 
-Coverage must include normal GET/PUT/SDCRZ, inline and fused list transfers,
-and separate synchronous treatment for GETLLAR/PUTLLC/PUTLLUC. Raw-SPU MMIO
-and unsupported mappings retain existing behavior.
+The first prototype covers normal and optimized-list GETs because v2 proves
+their repeated same-generation handoff cost. PUT/SDCRZ, GETLLAR/PUTLLC/PUTLLUC,
+Raw-SPU MMIO, ZCULL, ambiguous ownership, and unsupported mappings retain the
+existing behavior until separately proven. MFC tag and barrier completion must
+remain observationally identical.
 
-The synchronous ticket is an enabling prototype. Continue only if it removes
-roughly half of handled covered-MFC faults or improves a clean A/B by about 10%.
+Focused tests must cover lifetime races, sibling protection, invalidation,
+generation wrap, list elements, and MFC ordering before a game launch. The
+synchronous ticket is an enabling prototype. Continue only if it materially
+reduces handled GET faults and flush handoffs without moving the same cost into
+channel/MFC waits. Bedroom validation is followed by distinct gameplay scenes;
+a bedroom-only win is rejected.
 
 ## Phase 3: asynchronous MFC coherence broker
 
@@ -189,20 +224,22 @@ asynchronous coherence requests:
   race later LS modification;
 - keep atomic MFC transactions synchronous initially.
 
-The broker is worthwhile only if the oracle finds repeated/concurrent ranges or
-meaningful issue-to-consumption slack and a prototype materially reduces
-primary submissions/events. If the data are true, immediately consumed
-dependencies with no prediction or overlap window, this is a real
-synchronization bound rather than an implementation accident.
+Oracle v2 finds repeated same-generation GET handoffs, but it does not yet prove
+issue-to-consumption slack. Attempt the broker only if the synchronous ticket
+materially reduces redundant handoffs and leaves true readbacks as the bound,
+and only if the prototype reduces primary submissions/events. If the remaining
+data are true, immediately consumed dependencies with no prediction or overlap
+window, this is a real synchronization bound rather than an implementation
+accident.
 
 ## Deterministic PPU fault
 
-The one-per-frame PPU fault is independently valuable: removing its measured
-11.35 ms in the clean ledger, or 14.79 ms in the instrumented oracle interval,
-would be material if the time is fully serialized. The differing observations
-are not interchangeable absolute benchmarks, and neither is a guaranteed
-saving. Aggregate it by semantic access and ownership state as well as address
-and guest PC in oracle v2.
+The one-per-frame PPU fault is independently valuable. In the valid v2 window,
+its outer duration is 12.58 ms/frame and its true GPU/readback wait is about
+7.97 ms/frame. The differing older observations are not interchangeable
+absolute benchmarks, and none is a guaranteed saving. The PPU path should use
+the same range/ownership/content-generation model, not an observed address or
+guest PC.
 
 If it is a stable report/ZCULL/texture read, schedule readback at the producer's
 known RSX synchronization point rather than waiting for the consumer fault. If
@@ -243,13 +280,13 @@ if time merely moves from faults into channel, MFC, or GPU waits.
 
 ## Performance decision gate
 
-The clean ledger measured about 56.3 ms/frame and the later oracle interval
-about 53.3 ms/frame; 30 FPS requires 33.3 ms, so roughly 20--23 ms must be
-removed from the critical path. The one-per-frame PPU fault is a material lead,
-and oracle-v1 attached nearly all expensive readback wait to handled faults,
-but those timers overlap across nested and parallel actors. They do not prove a
-20 ms saving. Reaching 30 likely also requires hiding or removing SPU/RSX
-coherence work and, depending on scene, additional guest-compute improvements.
+The valid v2 window measured 55.065 ms/frame; 30 FPS requires 33.333 ms, so the
+gap is 21.73 ms/frame. It exposes roughly 14.94 ms/frame of true GPU/readback
+wait on deterministic faults. Even the impossible upper bound of eliminating
+all of that wait leaves about 40.1 ms/frame and another 6.8 ms/frame to recover.
+The 6.65-per-frame no-readback GET herd is therefore important alongside the
+true readbacks, but neither proves the remaining saving. Reaching 30 likely
+also requires work on the framebuffer-feedback path, guest execution, or both.
 In the later, nonstationary 14-FPS sample, main-PPU guest execution alone
 occupied roughly 46 ms/frame; that is not a clean critical-path measurement,
 but it rules out treating coherence as the entire problem. A plausible route

@@ -303,21 +303,43 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     Release+ThinLTO linked successfully and all 198 enabled tests passed; two
     existing tests remain disabled. The preserved app binary has SHA-256
     `91fc7261878e31cca83c9325c10b61874845e4f207bbf4879ff22af874c76cc9`.
-    Live validation is still pending.
+35. The preserved oracle-v2 capture at `e0be35322` passes every causal gate.
+    Its full marker window was 1,276 periods in 70.262005 seconds (18.1606
+    FPS); its exact attribution window was 1,254 frames in 69.051046 seconds.
+    Ring drops, untracked sites, missing/non-containing MFC context, section
+    overflow, mismatches, pairing errors, out-of-range readbacks, offloader
+    cases, and ZCULL cases were all zero. All 14,615 SPU handled faults carried
+    a containing MFC range. Per frame it measured one PPU plus 11.655 SPU
+    faults, four fault-attached of six global readbacks, 1,934,912 global
+    readback bytes, 9.657 flush waits totaling 14.990 ms, and six GPU/readback
+    waits totaling 14.943 ms. The paired evidence identifies one exact
+    230,400-byte native-page-collateral section per frame. More importantly,
+    two semantic list-GET classes take 6.65 no-readback faults/frame and 73.65%
+    of aggregate flush wait after the data are already synchronized. The
+    detailed artifact boundary and architecture decision are in
+    `FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`.
 
 ## Current blocker
 
-Oracle v2 is implemented; the current blocker is live validation. Repeat the
-bedroom with an adjacent overlay-off observer control and require zero ring or
-untracked-site loss, at least 95% containing SPU-origin MFC coverage, no
-unexplained section overflow/pairing failure, and no material observer cost.
-Only if a semantic class explains at least 80% of readback wait or predicts at
-least 5 ms/frame of non-overlapping critical-path
-savings should an exact-access ticket or batched slow path be implemented.
-Direct PPU JIT accesses still rely on host protection and cannot simply be
-converted to a 4 KiB software version table on macOS. Keep official
-1280x720/100% settings and treat the removed historical WCB/WDB patch only as a
-canary.
+Oracle v2 is live-validated. The current blocker is implementing a
+game-general, generation-keyed exact GET ticket/shadow directory. It must
+separate exact logical ownership from macOS's 16 KiB trap granularity, retain a
+CPU-visible shadow keyed by RSX content/synchronization generation, and let
+subsequent same-generation GETs use exact bytes through the safe alias without
+another signal or flush-queue handoff. Same-page siblings remain owned and
+protected; epoch races, unsupported mappings, atomics, ZCULL, and ambiguous
+ownership fall back unchanged. The ordinary MFC negative path must remain a few
+allocation-free local loads.
+
+Do not spend another iteration merely profiling the steady bedroom. Use it for
+focused functional and A/B validation after the prototype exists, then validate
+the semantic mechanism in distinct TLoU scenes. No production decision may key
+on the observed address, PC, section identity, cadence, or bedroom signature.
+Direct PPU JIT accesses still rely on host protection and remain a later
+producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
+treat the removed historical WCB/WDB patch only as a canary. The v2 window's
+roughly 15 ms/frame of true readback wait is material, but removing all of it
+would still leave about 6--7 ms/frame to reach 30 FPS.
 
 ## Current source work
 
@@ -348,6 +370,9 @@ canary.
   `FAULT_ORACLE_CAPTURE_F35963BE.md`; the report separates trustworthy
   aggregate evidence from the oracle-v1 attribution failures and records the
   oracle-v2 and cross-scene gates.
+- Preserved valid `e0be35322` capture report in
+  `FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`; it closes every v2 gate and selects a
+  generation-keyed exact GET ticket/shadow directory as the next implementation.
 
 All 198 enabled tests pass after oracle v2; two tests remain disabled in the
 existing suite. The 195-test result above belongs to the historical v1
@@ -385,6 +410,16 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   Its executable SHA-256 is
   `91fc7261878e31cca83c9325c10b61874845e4f207bbf4879ff22af874c76cc9`,
   and its embedded build identity is `19709-e0be3532`.
+- The valid oracle-v2 capture is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/cellfault-v2-2026-08-08-e0be3532`.
+  Its manifest SHA-256 is
+  `eedf2cb68c5cb8542f71fe5b29dc8ab9a022b9b9bec3d98cbc839722309ee494`,
+  full `RPCS3.log` SHA-256 is
+  `6358555ebbed0a91d5bf46910250e3848fe20fba1352ae925da9faa562e155b1`,
+  exact interval SHA-256 is
+  `f0730fe13f3e5dbaf3202fc2af764fa2402615fd0618f35a02ca0b07c19604a6`,
+  and post-window stack-sample SHA-256 is
+  `35607eedf560d1ecdbd6eeef3a89a265ff5dfdf164fcc2dcca0a137aa5eb5331`.
 - The final renderer profile is
   `home-release-lto-feedback-copy-edge`; it ran windowed with Strict Off,
   `Force Framebuffer Feedback Copies` On, and the Release+ThinLTO binary.

@@ -49,36 +49,40 @@ effective log configuration rather than only the intended YAML values.
 | Matching feedback workload during CELLSTAT | ~163.47 requests, 154.47 copies, 58 new snapshots, 96.47 refreshes, 9 generation reuses, and ~702.6 MiB logical copied per frame; every one of 101,198 dirty candidates was full coverage | Confirms the snapshot-reuse, cross-frame, and dirty-region branches remain exhausted; the coherence result is not caused by a changed renderer workload |
 | Fault-attribution oracle v1 checkpoint | Removed the 3.57-million/s MFC timer; added a 4,096-entry signal-safe fault ring, exact DMA/list/atomic MFC context, locked texture-section range classification, nested wait/readback attribution, and compact one-second summaries. Release+ThinLTO `rpcs3_emu` built and all 195 enabled tests passed | Ready for a behavior-neutral causal capture. Reject intervals with material drops, signature/section overflow, readback mismatch, missing MFC context, or offloader attribution; compare overlay on/off for observer cost |
 | First live fault-oracle capture (`f35963bea`) | 1,310 complete-bucket frames in 69.836 s: 18.758 FPS, p95 62.46 ms, maximum 107.54 ms. Zero ring drops; one PPU fault/frame, 11.77 SPU faults/frame, four fault-attached of six global readbacks/frame, and 99.98% of global readback-wait time attached. Signature overflow excluded 23.21% of events, MFC context covered only 25.42% of SPU faults with no GETs, and one multi-section event overflowed per frame | Aggregate scale keeps Cell/RSX coherence viable, but exact TOP/range percentages fail the oracle's own gates. Repair semantic aggregation, GET/raw-SPU attribution, and bounded multi-section capture before selecting policy. The bedroom is a microscope; production rules must be semantic and cross-scene validated |
-| Fault-attribution oracle v2 (`e0be35322`) | Added compiler signal fences so optimized list GETs retain asynchronous fault context; semantic 128-site aggregation; explicit normal/list/atomic/raw-proxy source; two ordinal-paired section/readback records; per-operation range validation; SPU-origin coverage gates; and exact untracked/overflow/pairing counters. Release+ThinLTO app linked and all 198 enabled tests passed | Behavior remains unchanged. Live validation, including an overlay-off observer control, is now the blocker before selecting a coherence policy |
+| Fault-attribution oracle v2 (`e0be35322`) | Added compiler signal fences so optimized list GETs retain asynchronous fault context; semantic 128-site aggregation; explicit normal/list/atomic/raw-proxy source; two ordinal-paired section/readback records; per-operation range validation; SPU-origin coverage gates; and exact untracked/overflow/pairing counters. Release+ThinLTO app linked and all 198 enabled tests passed | Behavior remains unchanged; ready for one bounded validation capture |
+| Valid oracle-v2 capture (`e0be35322`) | Full window: 1,276 periods/70.262005 s = 18.1606 FPS. Exact interior: 1,254 frames/69.051046 s; zero loss/overflow/mismatch/pairing/offloader gates and 14,615/14,615 containing SPU MFC contexts. Per frame: 1 PPU + 11.655 SPU faults, 4 fault-attached of 6 global readbacks, 14.990 ms aggregate flush wait, and 14.943 ms global readback wait. One 230,400-byte readback is native-page collateral; two semantic GET classes cause 6.65 no-readback faults/frame and 73.65% of flush wait | Oracle v2 is valid and the implementation gate is met. Build a generation-keyed exact GET ticket/shadow directory; do not continue bedroom-only profiling. True readbacks expose about 15 ms/frame, but 30 FPS would still need another 6--7 ms/frame. Production rules must be semantic and cross-scene validated |
 
 ## Next experiments
 
-1. Validate oracle v2 in the steady bedroom and require zero ring/site loss, no
-   unexplained section overflow or mismatch, and at least 95% containing MFC
-   context on SPU handled faults. Run an otherwise-identical overlay-off control
-   and reject more than 3--5% observer slowdown or material pacing/fault-rate
-   change.
-2. Group deterministic faults by semantic inputs—exact range, direction,
-   ownership/generation, command class, and selected sections—and continue only
-   if they explain at least 80% of readback wait or predict at least 5 ms/frame
-   of non-overlapping critical-path savings. Never promote a guest address, PC,
-   or bedroom signature into a production rule; repeat any candidate in
-   distinct scenes before generalizing it.
-3. If the valid oracle shows material SPU false sharing or repeated exact-range
-   slow paths, prototype an atomic native-page ownership/version preflight in
-   MFC. The common path must remain a few local loads: 3.57 million MFC
-   submissions per second cannot unconditionally call into RSX. Batch/coalesce
-   only the roughly 206-per-second slow path while preserving all current
-   fallbacks.
-4. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+1. Implement a generation-keyed exact GET ticket/shadow directory. Publish
+   exact RSX-owned intervals and content/synchronization generations behind a
+   lifetime epoch; use the native 16 KiB summary only as a cheap negative hint.
+   Reuse a pinned CPU-visible shadow for same-generation GETs and synchronize
+   only exact intersecting owners when stale. Preserve the existing fallback
+   on every ambiguity.
+2. Add focused concurrency, lifetime, sibling-protection, list-GET, tag/barrier,
+   invalidation, and generation-wrap tests before launching the game. The common
+   negative path must remain allocation-free and a few local loads: millions of
+   ordinary MFC submissions per second cannot call unconditionally into RSX.
+3. Use the bedroom only to functionally validate the prototype and measure one
+   overlay-off A/B. Require fewer handled GET faults and flush handoffs without
+   moving the time into MFC/channel waits or introducing visual corruption.
+   Then repeat the semantic mechanism in distinct gameplay scenes before making
+   a general performance claim. Never key production behavior on an address,
+   PC, section identity, cadence, or bedroom signature.
+4. If the exact synchronous ticket removes handoffs but true readbacks remain
+   serialized, extend only the proven slow path into a generation-coalescing
+   asynchronous MFC broker while preserving tag, barrier, local-store, atomic,
+   pause, and shutdown semantics.
+5. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-5. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+6. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-6. Only after the supported renderer path is measured, isolate-test the removed
+7. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-7. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+8. Keep renderer and title-patch work separate from boot commit `983c69d5e`.

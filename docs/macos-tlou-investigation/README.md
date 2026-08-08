@@ -24,7 +24,9 @@ but ineffective ideas; see
 selected architecture and its correctness gates are in
 [`COHERENCE_ARCHITECTURE.md`](COHERENCE_ARCHITECTURE.md). The first live
 fault-oracle capture and its exact validity boundary are recorded in
-[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md).
+[`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md); the
+live-validated oracle-v2 capture and architecture decision are in
+[`FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`](FAULT_ORACLE_V2_CAPTURE_E0BE3532.md).
 
 Important measurement rules:
 
@@ -52,8 +54,12 @@ as an architecture-scale lead. It also exposed observer defects: signature
 overflow, only 25.42% exact MFC coverage, no GET context, and one multi-section
 overflow per frame. Commit `e0be35322` implements oracle v2's signal-visible
 GET context, exact semantic-site table, and paired two-section observations.
-Live validation of those gates remains required before any production policy
-is selected.
+Its valid 1,254-frame interior window then achieved 100% containing SPU MFC
+coverage with zero ring, site, section, pairing, or offloader loss. It exposed
+one 230,400-byte native-page collateral readback per frame and a 6.65-per-frame
+herd of already-synchronized GET faults responsible for 73.65% of flush wait.
+The current implementation target is therefore a generation-keyed exact GET
+ticket/shadow directory. More bedroom-only profiling is not the blocker.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,
