@@ -5,6 +5,7 @@
 #include "timers.hpp"
 
 #include "SPUThread.h"
+#include "Emu/RSX/RSXCoherenceStats.h"
 
 inline void try_start(spu_thread& spu)
 {
@@ -159,6 +160,11 @@ bool spu_thread::read_reg(const u32 addr, u32& value)
 			if (cmd.size)
 			{
 				// Perform transfer immediately
+				const bool is_get = (cmd.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_START_MASK)) == MFC_GET_CMD;
+				const u8 cellstat_flags = is_get ? rsx::coherence_stats::mfc_context_get : rsx::coherence_stats::mfc_context_put;
+				rsx::coherence_stats::scoped_mfc_context cellstat_context(rsx::coherence_stats::is_enabled(),
+					id, cmd.eal, cmd.size, cmd.cmd, cmd.tag, cellstat_flags,
+					rsx::coherence_stats::mfc_context_source::raw_spu_proxy);
 				do_dma_transfer(nullptr, cmd, ls);
 			}
 

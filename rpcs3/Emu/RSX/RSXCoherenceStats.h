@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <type_traits>
 
 namespace rsx::coherence_stats
 {
@@ -75,6 +76,15 @@ namespace rsx::coherence_stats
 		mfc_context_atomic = 1 << 3,
 	};
 
+	enum class mfc_context_source : u8
+	{
+		none,
+		normal_dma,
+		list_fastpath,
+		atomic,
+		raw_spu_proxy,
+	};
+
 	enum renderer_fault_path : u8
 	{
 		renderer_fault_path_texture = 1 << 0,
@@ -98,7 +108,6 @@ namespace rsx::coherence_stats
 		fault_section_chain_or_other = 1 << 11,
 		fault_section_unknown_access_width = 1 << 12,
 		fault_section_locked_only = 1 << 13,
-		fault_section_multi_unknown = 1 << 14,
 	};
 
 	enum class fault_timing : u8
@@ -118,6 +127,7 @@ namespace rsx::coherence_stats
 		u8 cmd = 0;
 		u8 tag = 0;
 		u8 flags = 0;
+		mfc_context_source source = mfc_context_source::none;
 		bool valid = false;
 	};
 
@@ -140,13 +150,18 @@ namespace rsx::coherence_stats
 		bool m_active = false;
 
 	public:
-		scoped_mfc_context(bool enabled, u32 spu_id, u32 ea, u16 size, u8 cmd, u8 tag, u8 flags) noexcept
+		scoped_mfc_context(bool enabled, u32 spu_id, u32 ea, u16 size, u8 cmd, u8 tag, u8 flags, mfc_context_source source) noexcept
 		{
 			if (enabled)
 			{
 				m_previous = g_active_mfc_context;
-				g_active_mfc_context = {spu_id, ea, size, cmd, tag, flags, true};
+				g_active_mfc_context = {spu_id, ea, size, cmd, tag, flags, source, true};
 				m_active = true;
+
+				// The access-violation callback observes this TLS state asynchronously
+				// on the faulting thread. Keep the protected access between publication
+				// and restoration without imposing a hardware fence.
+				std::atomic_signal_fence(std::memory_order_seq_cst);
 			}
 		}
 
@@ -157,9 +172,35 @@ namespace rsx::coherence_stats
 		{
 			if (m_active)
 			{
+				std::atomic_signal_fence(std::memory_order_seq_cst);
 				g_active_mfc_context = m_previous;
 			}
 		}
+	};
+
+	constexpr usz fault_section_capacity = 2;
+
+	struct fault_section_observation
+	{
+		u64 readback_bytes = 0;
+		u64 sync_timestamp = 0;
+		u64 last_write_tag = 0;
+		u64 rop_timestamp = 0;
+		u32 readback_start = umax;
+		u32 readback_end = 0;
+		u32 full_start = umax;
+		u32 full_end = 0;
+		u32 confirmed_start = umax;
+		u32 confirmed_end = 0;
+		u32 locked_start = umax;
+		u32 locked_end = 0;
+		u32 context = 0;
+		u32 relation_flags = 0;
+		u8 protection = 0;
+		u8 read_flags = 0;
+		bool synchronized = false;
+		bool has_section = false;
+		bool has_readback = false;
 	};
 
 	struct fault_event
@@ -181,6 +222,7 @@ namespace rsx::coherence_stats
 		bool is_writing = false;
 		u8 renderer_path = 0;
 		mfc_context mfc{};
+		std::array<fault_section_observation, fault_section_capacity> sections{};
 		u64 vk_probe_ticks = 0;
 		u64 vk_probe_start = 0;
 		u64 vk_probe_end = 0;
@@ -196,24 +238,11 @@ namespace rsx::coherence_stats
 		u64 readback_bytes = 0;
 		u32 readback_start = umax;
 		u32 readback_end = 0;
-		u32 section_full_start = umax;
-		u32 section_full_end = 0;
-		u32 section_confirmed_start = umax;
-		u32 section_confirmed_end = 0;
-		u32 section_locked_start = umax;
-		u32 section_locked_end = 0;
-		u32 section_context = 0;
-		u8 section_protection = 0;
-		u8 section_read_flags = 0;
-		bool section_synchronized = false;
-		u64 section_sync_timestamp = 0;
-		u64 section_last_write_tag = 0;
-		u64 section_rop_timestamp = 0;
 		u32 readback_section_count = 0;
 		u32 readback_section_overflow = 0;
+		u32 readback_pairing_errors = 0;
 		u32 access_start = umax;
 		u32 access_end = 0;
-		u32 section_relation_flags = 0;
 		bool mfc_contains_fault = false;
 		u32 vk_probe_count = 0;
 		u32 flush_wait_count = 0;
@@ -221,6 +250,151 @@ namespace rsx::coherence_stats
 		u32 readback_wait_count = 0;
 		u32 readback_count = 0;
 	};
+
+	static_assert(std::is_trivially_copyable_v<mfc_context>);
+	static_assert(std::is_trivially_copyable_v<fault_section_observation>);
+	static_assert(std::is_trivially_copyable_v<fault_event>);
+
+	enum class fault_section_class : u8
+	{
+		none,
+		confirmed,
+		confirmed_padding,
+		locked_only,
+		chain_or_other,
+	};
+
+	inline fault_section_class classify_section(const fault_section_observation& section) noexcept
+	{
+		if (!section.has_section)
+		{
+			return fault_section_class::none;
+		}
+
+		if (section.relation_flags & fault_section_access_confirmed)
+		{
+			return fault_section_class::confirmed;
+		}
+
+		if (section.relation_flags & fault_section_confirmed_padding)
+		{
+			return fault_section_class::confirmed_padding;
+		}
+
+		if (section.relation_flags & fault_section_locked_only)
+		{
+			return fault_section_class::locked_only;
+		}
+
+		return fault_section_class::chain_or_other;
+	}
+
+	inline u8 section_semantic_key(const fault_section_observation& section) noexcept
+	{
+		u8 result = static_cast<u8>(classify_section(section));
+		result |= section.relation_flags & fault_section_native_collateral ? 1 << 4 : 0;
+		result |= section.relation_flags & fault_section_other_4k_lane ? 1 << 5 : 0;
+		result |= section.relation_flags & fault_section_unknown_access_width ? 1 << 6 : 0;
+		return result;
+	}
+
+	struct fault_section_site_key
+	{
+		u32 context = 0;
+		u8 relation = 0;
+		u8 protection = 0;
+		u8 read_flags = 0;
+		bool synchronized = false;
+
+		bool operator==(const fault_section_site_key&) const = default;
+	};
+
+	inline bool section_site_key_less(const fault_section_site_key& lhs, const fault_section_site_key& rhs) noexcept
+	{
+		if (lhs.relation != rhs.relation) return lhs.relation < rhs.relation;
+		if (lhs.context != rhs.context) return lhs.context < rhs.context;
+		if (lhs.protection != rhs.protection) return lhs.protection < rhs.protection;
+		if (lhs.read_flags != rhs.read_flags) return lhs.read_flags < rhs.read_flags;
+		return lhs.synchronized < rhs.synchronized;
+	}
+
+	inline std::array<fault_section_site_key, fault_section_capacity> sorted_section_semantic_keys(const fault_event& event) noexcept
+	{
+		std::array<fault_section_site_key, fault_section_capacity> result{};
+
+		for (usz i = 0; i < fault_section_capacity; i++)
+		{
+			const auto& section = event.sections[i];
+			result[i] = {section.context, section_semantic_key(section), section.protection, section.read_flags, section.synchronized};
+		}
+
+		std::sort(result.begin(), result.end(), section_site_key_less);
+		return result;
+	}
+
+	inline u8 mfc_command_family(u8 command) noexcept
+	{
+		return command & 0xf0;
+	}
+
+	inline u8 readback_count_bucket(u32 count) noexcept
+	{
+		return static_cast<u8>(std::min<u32>(count, 3));
+	}
+
+	inline bool semantic_site_matches(const fault_event& lhs, const fault_event& rhs) noexcept
+	{
+		return lhs.origin == rhs.origin &&
+			lhs.origin_guest_pc == rhs.origin_guest_pc &&
+			lhs.fault_instruction == rhs.fault_instruction &&
+			lhs.is_writing == rhs.is_writing &&
+			lhs.renderer_path == rhs.renderer_path &&
+			lhs.mfc.valid == rhs.mfc.valid &&
+			lhs.mfc.source == rhs.mfc.source &&
+			lhs.mfc_contains_fault == rhs.mfc_contains_fault &&
+			mfc_command_family(lhs.mfc.cmd) == mfc_command_family(rhs.mfc.cmd) &&
+			lhs.mfc.flags == rhs.mfc.flags &&
+			readback_count_bucket(lhs.readback_count) == readback_count_bucket(rhs.readback_count) &&
+			(lhs.readback_section_overflow != 0) == (rhs.readback_section_overflow != 0) &&
+			sorted_section_semantic_keys(lhs) == sorted_section_semantic_keys(rhs);
+	}
+
+	inline u32 stored_section_count(const fault_event& event) noexcept
+	{
+		u32 result = 0;
+
+		for (const auto& section : event.sections)
+		{
+			result += section.has_section;
+		}
+
+		return result;
+	}
+
+	inline u32 unmatched_section_count(const fault_event& event) noexcept
+	{
+		return event.readback_section_count > event.readback_count ?
+			event.readback_section_count - event.readback_count : 0;
+	}
+
+	inline u32 unmatched_readback_count(const fault_event& event) noexcept
+	{
+		return event.readback_count > event.readback_section_count ?
+			event.readback_count - event.readback_section_count : 0;
+	}
+
+	inline u32 readbacks_outside_locked_count(const fault_event& event) noexcept
+	{
+		u32 result = 0;
+
+		for (const auto& section : event.sections)
+		{
+			result += section.has_section && section.has_readback && section.readback_bytes &&
+				(section.readback_start < section.locked_start || section.readback_end > section.locked_end);
+		}
+
+		return result;
+	}
 
 	constexpr usz fault_ring_capacity = 4096;
 	static_assert(std::has_single_bit(fault_ring_capacity));
@@ -260,7 +434,7 @@ namespace rsx::coherence_stats
 			}
 		}
 
-		bool try_push(fault_event event) noexcept
+		bool try_push(const fault_event& event) noexcept
 		{
 			u64 pos = m_enqueue_pos.load(std::memory_order_relaxed);
 			fault_event_slot* slot = nullptr;
@@ -289,8 +463,8 @@ namespace rsx::coherence_stats
 				}
 			}
 
-			event.sequence = pos + 1;
 			slot->event = event;
+			slot->event.sequence = pos + 1;
 			slot->sequence.store(pos + 1, std::memory_order_release);
 			return true;
 		}
@@ -522,14 +696,32 @@ namespace rsx::coherence_stats
 
 			if (g_active_fault_event)
 			{
-				g_active_fault_event->readback_bytes += bytes;
-				g_active_fault_event->readback_count++;
+				auto& event = *g_active_fault_event;
+				const u32 ordinal = event.readback_count++;
+				event.readback_pairing_errors += ordinal >= event.readback_section_count;
+				event.readback_bytes += bytes;
 
 				if (bytes)
 				{
 					const u32 end = static_cast<u32>(std::min<u64>(umax, static_cast<u64>(start) + bytes - 1));
-					g_active_fault_event->readback_start = std::min(g_active_fault_event->readback_start, start);
-					g_active_fault_event->readback_end = std::max(g_active_fault_event->readback_end, end);
+					event.readback_start = std::min(event.readback_start, start);
+					event.readback_end = std::max(event.readback_end, end);
+
+					if (ordinal < fault_section_capacity && event.sections[ordinal].has_section)
+					{
+						auto& observation = event.sections[ordinal];
+						observation.readback_start = start;
+						observation.readback_end = end;
+						observation.readback_bytes = bytes;
+						observation.has_readback = true;
+					}
+				}
+				else if (ordinal < fault_section_capacity && event.sections[ordinal].has_section)
+				{
+					auto& observation = event.sections[ordinal];
+					observation.readback_start = start;
+					observation.readback_end = start;
+					observation.has_readback = true;
 				}
 			}
 		}
@@ -545,15 +737,16 @@ namespace rsx::coherence_stats
 		}
 
 		auto& event = *g_active_fault_event;
-		event.readback_section_count++;
+		const u32 ordinal = event.readback_section_count++;
 
-		if (event.readback_section_count != 1)
+		if (ordinal >= fault_section_capacity)
 		{
 			event.readback_section_overflow++;
-			event.section_relation_flags = fault_section_multi_unknown |
-				(!event.mfc.valid && !event.fault_access_size ? fault_section_unknown_access_width : 0);
 			return;
 		}
+
+		auto& section = event.sections[ordinal];
+		section.has_section = true;
 
 		const u32 access_start = event.mfc.valid && event.mfc.size ? event.mfc.ea : event.fault_address;
 		const u64 access_size = event.mfc.valid && event.mfc.size ? event.mfc.size : std::max<u8>(event.fault_access_size, 1);
@@ -579,15 +772,15 @@ namespace rsx::coherence_stats
 		const u32 fault_lane_start = event.fault_address & -0x1000;
 		const u32 fault_lane_end = fault_lane_start + 0xfff;
 
-		event.section_relation_flags |= access_confirmed ? fault_section_access_confirmed : 0;
-		event.section_relation_flags |= access_full ? fault_section_access_full : 0;
-		event.section_relation_flags |= access_locked ? fault_section_access_locked : 0;
-		event.section_relation_flags |= contains(access_start, access_end, confirmed_start, confirmed_end) ? fault_section_access_contains_confirmed : 0;
-		event.section_relation_flags |= contains(access_start, access_end, full_start, full_end) ? fault_section_access_contains_full : 0;
-		event.section_relation_flags |= fault_confirmed ? fault_section_fault_confirmed : 0;
-		event.section_relation_flags |= fault_full ? fault_section_fault_full : 0;
-		event.section_relation_flags |= fault_locked ? fault_section_fault_locked : 0;
-		event.section_relation_flags |= !event.mfc.valid && !event.fault_access_size ? fault_section_unknown_access_width : 0;
+		section.relation_flags |= access_confirmed ? fault_section_access_confirmed : 0;
+		section.relation_flags |= access_full ? fault_section_access_full : 0;
+		section.relation_flags |= access_locked ? fault_section_access_locked : 0;
+		section.relation_flags |= contains(access_start, access_end, confirmed_start, confirmed_end) ? fault_section_access_contains_confirmed : 0;
+		section.relation_flags |= contains(access_start, access_end, full_start, full_end) ? fault_section_access_contains_full : 0;
+		section.relation_flags |= fault_confirmed ? fault_section_fault_confirmed : 0;
+		section.relation_flags |= fault_full ? fault_section_fault_full : 0;
+		section.relation_flags |= fault_locked ? fault_section_fault_locked : 0;
+		section.relation_flags |= !event.mfc.valid && !event.fault_access_size ? fault_section_unknown_access_width : 0;
 
 		if (access_confirmed)
 		{
@@ -595,37 +788,37 @@ namespace rsx::coherence_stats
 		}
 		else if (access_full)
 		{
-			event.section_relation_flags |= fault_section_confirmed_padding;
+			section.relation_flags |= fault_section_confirmed_padding;
 		}
 		else if (access_locked)
 		{
 			// locked_range is host-page expanded (16 KiB on Apple silicon), so
 			// this is native-page collateral outside the section's logical range.
-			event.section_relation_flags |= fault_section_locked_only | fault_section_native_collateral;
+			section.relation_flags |= fault_section_locked_only | fault_section_native_collateral;
 
 			if (!overlaps(full_start, full_end, fault_lane_start, fault_lane_end))
 			{
-				event.section_relation_flags |= fault_section_other_4k_lane;
+				section.relation_flags |= fault_section_other_4k_lane;
 			}
 		}
 		else
 		{
-			event.section_relation_flags |= fault_section_chain_or_other;
+			section.relation_flags |= fault_section_chain_or_other;
 		}
 
-		event.section_full_start = full_start;
-		event.section_full_end = full_end;
-		event.section_confirmed_start = confirmed_start;
-		event.section_confirmed_end = confirmed_end;
-		event.section_locked_start = locked_start;
-		event.section_locked_end = locked_end;
-		event.section_context = context;
-		event.section_protection = protection;
-		event.section_read_flags = read_flags;
-		event.section_synchronized = synchronized;
-		event.section_sync_timestamp = sync_timestamp;
-		event.section_last_write_tag = last_write_tag;
-		event.section_rop_timestamp = rop_timestamp;
+		section.full_start = full_start;
+		section.full_end = full_end;
+		section.confirmed_start = confirmed_start;
+		section.confirmed_end = confirmed_end;
+		section.locked_start = locked_start;
+		section.locked_end = locked_end;
+		section.context = context;
+		section.protection = protection;
+		section.read_flags = read_flags;
+		section.synchronized = synchronized;
+		section.sync_timestamp = sync_timestamp;
+		section.last_write_tag = last_write_tag;
+		section.rop_timestamp = rop_timestamp;
 	}
 
 	struct timed_snapshot

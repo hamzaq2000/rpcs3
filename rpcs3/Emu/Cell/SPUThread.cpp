@@ -2048,7 +2048,8 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 	const u8 cellstat_flags = (is_get ? rsx::coherence_stats::mfc_context_get : rsx::coherence_stats::mfc_context_put) |
 		(is_list ? rsx::coherence_stats::mfc_context_list : 0);
 	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled,
-		_this ? _this->id : 0, args.eal, args.size, args.cmd, args.tag, cellstat_flags);
+		_this ? _this->id : 0, args.eal, args.size, args.cmd, args.tag, cellstat_flags,
+		rsx::coherence_stats::mfc_context_source::normal_dma);
 
 	u32 eal = args.eal;
 	u32 lsa = args.lsa & 0x3ffff;
@@ -2921,8 +2922,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					constexpr usz _128 = 128;
 
 					// This whole function relies on many constraints to be met (crashes real MFC), we can a have minor optimization assuming EA alignment to be +16 with +16 byte transfers
-#define MOV_T(type, index, _ea) { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list); *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
-#define MOV_128(dst_index, item_index, _source_ea) { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list); mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } void()
+#define MOV_T(type, index, _ea) { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
+#define MOV_128(dst_index, item_index, _source_ea) { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } void()
 
 					switch (s_size)
 					{
@@ -3189,7 +3190,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		if (addr < RAW_SPU_BASE_ADDR && size && optimization_compatible == MFC_GET_CMD)
 		{
 			rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, addr, static_cast<u16>(size),
-				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list);
+				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list,
+				rsx::coherence_stats::mfc_context_source::list_fastpath);
 			const u8* src = vm::_ptr<u8>(addr);
 			u8* dst = this->ls + arg_lsa + (addr & 0xf);
 
@@ -3262,7 +3264,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		else if (optimization_compatible == MFC_PUT_CMD && ((addr >> 28 == rsx::constants::local_mem_base >> 28) || (addr < RAW_SPU_BASE_ADDR && size - 1 <= 0x400 - 1 && (addr % 0x10000 + (size - 1)) < 0x10000)))
 		{
 			rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, addr, static_cast<u16>(size),
-				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_list);
+				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_list,
+				rsx::coherence_stats::mfc_context_source::list_fastpath);
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
 			{
 				rsx_lock.update_if_enabled(addr, size, range_lock);
@@ -3401,7 +3404,8 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 	perf_meter<"PUTLLC+"_u64> perf1 = perf0;
 	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
 	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, args.eal & -128,
-		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic);
+		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic,
+		rsx::coherence_stats::mfc_context_source::atomic);
 
 	// Store conditionally
 	const u32 addr = args.eal & -128;
@@ -3722,7 +3726,8 @@ void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 	perf_meter<"PUTLLUC"_u64> perf0;
 	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
 	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, args.eal & -128,
-		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic);
+		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic,
+		rsx::coherence_stats::mfc_context_source::atomic);
 
 	const u32 addr = args.eal & -128;
 
@@ -4277,7 +4282,8 @@ bool spu_thread::process_mfc_cmd()
 		perf_meter<"GETLLAR"_u64> perf0;
 		const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
 		rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, ch_mfc_cmd.eal & -128,
-			128, ch_mfc_cmd.cmd, ch_mfc_cmd.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_atomic);
+			128, ch_mfc_cmd.cmd, ch_mfc_cmd.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_atomic,
+			rsx::coherence_stats::mfc_context_source::atomic);
 
 		const u32 addr = ch_mfc_cmd.eal & -128;
 		const auto& data = vm::_ref<spu_rdata_t>(addr);
