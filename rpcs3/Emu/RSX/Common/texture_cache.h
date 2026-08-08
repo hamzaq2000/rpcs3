@@ -2069,7 +2069,7 @@ namespace rsx
 					(result.external_subresource_desc.op == deferred_request_command::blit_image_static);
 
 				if (attr.edge_clamped &&
-					!g_cfg.video.strict_rendering_mode &&
+					!g_cfg.video.avoid_framebuffer_feedback_loops() &&
 					is_simple_subresource_copy &&
 					render_target_format_is_compatible(result.external_subresource_desc.src0(), attr.gcm_format))
 				{

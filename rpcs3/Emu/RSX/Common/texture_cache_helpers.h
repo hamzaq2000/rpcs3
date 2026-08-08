@@ -82,9 +82,9 @@ namespace rsx
 	{
 		static inline bool force_strict_fbo_sampling(u8 samples)
 		{
-			if (g_cfg.video.strict_rendering_mode)
+			if (g_cfg.video.avoid_framebuffer_feedback_loops())
 			{
-				// Strict mode. All access is strict.
+				// Avoid sampling directly from a live render target.
 				return true;
 			}
 
