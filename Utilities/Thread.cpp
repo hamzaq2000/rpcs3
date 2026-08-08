@@ -1543,7 +1543,25 @@ u64 get_a64_reg_value(ucontext_t* context, u32 reg_index, u32 reg_size)
 
 namespace rsx
 {
-	extern std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
+	extern std::function<bool(u32 addr, bool is_writing, const access_violation_info& info)> g_access_violation_handler;
+
+	void populate_access_violation_diagnostics(access_violation_info& info) noexcept
+	{
+#if defined(ARCH_ARM64)
+		auto* context = static_cast<ucontext_t*>(const_cast<void*>(info.native_context));
+		info.instruction = read_from_ptr_unsafe<u32>(reinterpret_cast<const u8*>(RIP(context)));
+		info.esr = aarch64::_read_ESR_EL1(context);
+
+		// ESR_EL1.ISV says the syndrome's SAS field is valid. Leave zero for
+		// SIMD/pair/other accesses the kernel did not describe precisely.
+		if (info.esr & (1ull << 24))
+		{
+			info.access_size = static_cast<u8>(1u << ((info.esr >> 22) & 3));
+		}
+#else
+		static_cast<void>(info);
+#endif
+	}
 }
 
 bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t* context) noexcept
@@ -1591,7 +1609,11 @@ bool handle_access_violation(u32 addr, bool is_writing, bool is_exec, ucontext_t
 			state_changed = vm::temporary_unlock(*cpu);
 		}
 
-		bool handled = rsx::g_access_violation_handler(addr, is_writing);
+		rsx::access_violation_info info{};
+		info.host_pc = static_cast<u64>(RIP(context));
+		info.native_context = context;
+
+		bool handled = rsx::g_access_violation_handler(addr, is_writing, info);
 
 		if (state_changed && (cpu->state += cpu_flag::temp, cpu->test_stopped()))
 		{

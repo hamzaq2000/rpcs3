@@ -42,6 +42,17 @@ namespace rsx
 
 	struct context;
 
+	struct access_violation_info
+	{
+		u64 host_pc = 0;
+		const void* native_context = nullptr;
+		u64 esr = 0;
+		u32 instruction = 0;
+		u8 access_size = 0;
+	};
+
+	void populate_access_violation_diagnostics(access_violation_info& info) noexcept;
+
 	namespace overlays
 	{
 		class display_manager;

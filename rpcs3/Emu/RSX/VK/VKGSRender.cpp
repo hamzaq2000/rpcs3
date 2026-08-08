@@ -895,7 +895,7 @@ VKGSRender::~VKGSRender()
 
 bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 {
-	rsx::coherence_stats::scoped_timer fault_timer(rsx::coherence_stats::g_ledger.vk_fault_probe);
+	rsx::coherence_stats::scoped_timer fault_timer(rsx::coherence_stats::g_ledger.vk_fault_probe, nullptr, rsx::coherence_stats::fault_timing::vk_probe);
 
 	rsx::mm_flush(address);
 
@@ -913,13 +913,23 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 
 	if (!result.violation_handled)
 	{
-		return zcull_ctrl->on_access_violation(address);
+		const bool handled = zcull_ctrl->on_access_violation(address);
+
+		if (handled)
+		{
+			rsx::coherence_stats::mark_renderer_fault_path(rsx::coherence_stats::renderer_fault_path_zcull);
+		}
+
+		return handled;
 	}
+
+	rsx::coherence_stats::mark_renderer_fault_path(rsx::coherence_stats::renderer_fault_path_texture);
 
 	if (result.num_flushable > 0)
 	{
 		if (g_fxo->get<rsx::dma_manager>().is_current_thread())
 		{
+			rsx::coherence_stats::mark_renderer_fault_path(rsx::coherence_stats::renderer_fault_path_offloader);
 			// The offloader thread cannot handle flush requests
 			ensure(!(m_queue_status & flush_queue_state::deadlock));
 
@@ -969,7 +979,7 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 		{
 			// Wait for the RSX thread to process request if it hasn't already
 			{
-				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.vk_flush_wait);
+				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.vk_flush_wait, nullptr, rsx::coherence_stats::fault_timing::flush_wait);
 				m_flush_requests.producer_wait();
 			}
 

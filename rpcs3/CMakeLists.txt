@@ -191,6 +191,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_surface_content_tracker.cpp
             tests/test_sys_fs.cpp
             tests/test_rsx_cfg.cpp
+            tests/test_rsx_coherence_stats.cpp
             tests/test_rsx_fp_asm.cpp
             tests/test_dmux_pamf.cpp
             tests/test_spu_analyser.cpp

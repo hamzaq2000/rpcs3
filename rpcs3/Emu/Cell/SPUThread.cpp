@@ -1695,7 +1695,7 @@ void spu_thread::cpu_work()
 	if (gen_interrupt)
 	{
 		// Interrupt! escape everything and restart execution
-		rsx::coherence_stats::finish_active_mfc_process();
+		rsx::coherence_stats::clear_active_mfc_context();
 		spu_runtime::g_escape(this);
 	}
 }
@@ -2039,11 +2039,16 @@ void spu_thread::push_snr(u32 number, u32 value)
 	});
 }
 
-void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls)
+void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls, bool is_list)
 {
 	perf_meter<"DMA"_u32> perf_;
 
 	const bool is_get = (args.cmd & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_START_MASK)) == MFC_GET_CMD;
+	const bool cellstat_enabled = _this && rsx::coherence_stats::is_enabled();
+	const u8 cellstat_flags = (is_get ? rsx::coherence_stats::mfc_context_get : rsx::coherence_stats::mfc_context_put) |
+		(is_list ? rsx::coherence_stats::mfc_context_list : 0);
+	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled,
+		_this ? _this->id : 0, args.eal, args.size, args.cmd, args.tag, cellstat_flags);
 
 	u32 eal = args.eal;
 	u32 lsa = args.lsa & 0x3ffff;
@@ -2832,6 +2837,7 @@ bool spu_thread::do_dma_check(const spu_mfc_cmd& args)
 bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 {
 	perf_meter<"MFC_LIST"_u64> perf0;
+	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
 
 	// Amount of elements to fetch in one go
 	constexpr u32 fetch_size = 6;
@@ -2915,8 +2921,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					constexpr usz _128 = 128;
 
 					// This whole function relies on many constraints to be met (crashes real MFC), we can a have minor optimization assuming EA alignment to be +16 with +16 byte transfers
-#define MOV_T(type, index, _ea) { const usz ea = _ea; *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
-#define MOV_128(index, ea) mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (ea)))
+#define MOV_T(type, index, _ea) { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list); *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
+#define MOV_128(dst_index, item_index, _source_ea) { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list); mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } void()
 
 					switch (s_size)
 					{
@@ -3075,12 +3081,12 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					}
 					case 128:
 					{
-						MOV_128(0, items[0].ea);
-						MOV_128(1, items[1].ea);
-						MOV_128(2, items[2].ea);
-						MOV_128(3, items[3].ea);
-						MOV_128(4, items[4].ea);
-						MOV_128(5, items[5].ea);
+						MOV_128(0, 0, items[0].ea);
+						MOV_128(1, 1, items[1].ea);
+						MOV_128(2, 2, items[2].ea);
+						MOV_128(3, 3, items[3].ea);
+						MOV_128(4, 4, items[4].ea);
+						MOV_128(5, 5, items[5].ea);
 
 						if (!arg_size)
 						{
@@ -3092,23 +3098,23 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					case 256:
 					{
 						const usz ea0 = items[0].ea;
-						MOV_128(0, ea0 + 0);
-						MOV_128(1, ea0 + _128);
+						MOV_128(0, 0, ea0 + 0);
+						MOV_128(1, 0, ea0 + _128);
 						const usz ea1 = items[1].ea;
-						MOV_128(2, ea1 + 0);
-						MOV_128(3, ea1 + _128);
+						MOV_128(2, 1, ea1 + 0);
+						MOV_128(3, 1, ea1 + _128);
 						const usz ea2 = items[2].ea;
-						MOV_128(4, ea2 + 0);
-						MOV_128(5, ea2 + _128);
+						MOV_128(4, 2, ea2 + 0);
+						MOV_128(5, 2, ea2 + _128);
 						const usz ea3 = items[3].ea;
-						MOV_128(6, ea3 + 0);
-						MOV_128(7, ea3 + _128);
+						MOV_128(6, 3, ea3 + 0);
+						MOV_128(7, 3, ea3 + _128);
 						const usz ea4 = items[4].ea;
-						MOV_128(8, ea4 + 0);
-						MOV_128(9, ea4 + _128);
+						MOV_128(8, 4, ea4 + 0);
+						MOV_128(9, 4, ea4 + _128);
 						const usz ea5 = items[5].ea;
-						MOV_128(10, ea5 + 0);
-						MOV_128(11, ea5 + _128);
+						MOV_128(10, 5, ea5 + 0);
+						MOV_128(11, 5, ea5 + _128);
 
 						if (!arg_size)
 						{
@@ -3120,35 +3126,35 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					case 512:
 					{
 						const usz ea0 = items[0].ea;
-						MOV_128(0 , ea0 + _128 * 0);
-						MOV_128(1 , ea0 + _128 * 1);
-						MOV_128(2 , ea0 + _128 * 2);
-						MOV_128(3 , ea0 + _128 * 3);
+						MOV_128(0 , 0, ea0 + _128 * 0);
+						MOV_128(1 , 0, ea0 + _128 * 1);
+						MOV_128(2 , 0, ea0 + _128 * 2);
+						MOV_128(3 , 0, ea0 + _128 * 3);
 						const usz ea1 = items[1].ea;
-						MOV_128(4 , ea1 + _128 * 0);
-						MOV_128(5 , ea1 + _128 * 1);
-						MOV_128(6 , ea1 + _128 * 2);
-						MOV_128(7 , ea1 + _128 * 3);
+						MOV_128(4 , 1, ea1 + _128 * 0);
+						MOV_128(5 , 1, ea1 + _128 * 1);
+						MOV_128(6 , 1, ea1 + _128 * 2);
+						MOV_128(7 , 1, ea1 + _128 * 3);
 						const usz ea2 = items[2].ea;
-						MOV_128(8 , ea2 + _128 * 0);
-						MOV_128(9 , ea2 + _128 * 1);
-						MOV_128(10, ea2 + _128 * 2);
-						MOV_128(11, ea2 + _128 * 3);
+						MOV_128(8 , 2, ea2 + _128 * 0);
+						MOV_128(9 , 2, ea2 + _128 * 1);
+						MOV_128(10, 2, ea2 + _128 * 2);
+						MOV_128(11, 2, ea2 + _128 * 3);
 						const usz ea3 = items[3].ea;
-						MOV_128(12, ea3 + _128 * 0);
-						MOV_128(13, ea3 + _128 * 1);
-						MOV_128(14, ea3 + _128 * 2);
-						MOV_128(15, ea3 + _128 * 3);
+						MOV_128(12, 3, ea3 + _128 * 0);
+						MOV_128(13, 3, ea3 + _128 * 1);
+						MOV_128(14, 3, ea3 + _128 * 2);
+						MOV_128(15, 3, ea3 + _128 * 3);
 						const usz ea4 = items[4].ea;
-						MOV_128(16, ea4 + _128 * 0);
-						MOV_128(17, ea4 + _128 * 1);
-						MOV_128(18, ea4 + _128 * 2);
-						MOV_128(19, ea4 + _128 * 3);
+						MOV_128(16, 4, ea4 + _128 * 0);
+						MOV_128(17, 4, ea4 + _128 * 1);
+						MOV_128(18, 4, ea4 + _128 * 2);
+						MOV_128(19, 4, ea4 + _128 * 3);
 						const usz ea5 = items[5].ea;
-						MOV_128(20, ea5 + _128 * 0);
-						MOV_128(21, ea5 + _128 * 1);
-						MOV_128(22, ea5 + _128 * 2);
-						MOV_128(23, ea5 + _128 * 3);
+						MOV_128(20, 5, ea5 + _128 * 0);
+						MOV_128(21, 5, ea5 + _128 * 1);
+						MOV_128(22, 5, ea5 + _128 * 2);
+						MOV_128(23, 5, ea5 + _128 * 3);
 
 						if (!arg_size)
 						{
@@ -3182,6 +3188,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Try to inline the transfer
 		if (addr < RAW_SPU_BASE_ADDR && size && optimization_compatible == MFC_GET_CMD)
 		{
+			rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, addr, static_cast<u16>(size),
+				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list);
 			const u8* src = vm::_ptr<u8>(addr);
 			u8* dst = this->ls + arg_lsa + (addr & 0xf);
 
@@ -3253,6 +3261,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 		// Avoid inlining huge transfers because it intentionally drops range lock unlock
 		else if (optimization_compatible == MFC_PUT_CMD && ((addr >> 28 == rsx::constants::local_mem_base >> 28) || (addr < RAW_SPU_BASE_ADDR && size - 1 <= 0x400 - 1 && (addr % 0x10000 + (size - 1)) < 0x10000)))
 		{
+			rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, addr, static_cast<u16>(size),
+				transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_list);
 			if (addr >> 28 != rsx::constants::local_mem_base >> 28)
 			{
 				rsx_lock.update_if_enabled(addr, size, range_lock);
@@ -3345,7 +3355,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 			transfer.size = size;
 
 			arg_lsa += utils::align<u32>(size, 16);
-			do_dma_transfer(this, transfer, ls);
+			do_dma_transfer(this, transfer, ls, true);
 		}
 
 		arg_size -= 8;
@@ -3389,6 +3399,9 @@ bool spu_thread::do_putllc(const spu_mfc_cmd& args)
 {
 	perf_meter<"PUTLLC-"_u64> perf0;
 	perf_meter<"PUTLLC+"_u64> perf1 = perf0;
+	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
+	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, args.eal & -128,
+		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic);
 
 	// Store conditionally
 	const u32 addr = args.eal & -128;
@@ -3707,6 +3720,9 @@ void do_cell_atomic_128_store(u32 addr, const void* to_write)
 void spu_thread::do_putlluc(const spu_mfc_cmd& args)
 {
 	perf_meter<"PUTLLUC"_u64> perf0;
+	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
+	rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, args.eal & -128,
+		128, args.cmd, args.tag, rsx::coherence_stats::mfc_context_put | rsx::coherence_stats::mfc_context_atomic);
 
 	const u32 addr = args.eal & -128;
 
@@ -3872,7 +3888,7 @@ bool spu_thread::do_mfc(bool can_escape, bool must_finish)
 
 		if (can_escape && check_mfc_interrupts(pc + 4))
 		{
-			rsx::coherence_stats::finish_active_mfc_process();
+			rsx::coherence_stats::clear_active_mfc_context();
 			spu_runtime::g_escape(this);
 		}
 
@@ -4219,8 +4235,6 @@ u32 evaluate_spin_optimization(std::span<u8> stats, u64 evaluate_time, const cfg
 
 bool spu_thread::process_mfc_cmd()
 {
-	rsx::coherence_stats::scoped_mfc_timer mfc_timer(id);
-
 	// Stall infinitely if MFC queue is full
 	while (mfc_size >= 16) [[unlikely]]
 	{
@@ -4261,6 +4275,9 @@ bool spu_thread::process_mfc_cmd()
 	case MFC_GETLLAR_CMD:
 	{
 		perf_meter<"GETLLAR"_u64> perf0;
+		const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
+		rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, ch_mfc_cmd.eal & -128,
+			128, ch_mfc_cmd.cmd, ch_mfc_cmd.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_atomic);
 
 		const u32 addr = ch_mfc_cmd.eal & -128;
 		const auto& data = vm::_ref<spu_rdata_t>(addr);
@@ -4953,7 +4970,7 @@ bool spu_thread::process_mfc_cmd()
 			if (check_mfc_interrupts(pc + 4))
 			{
 				do_mfc(false);
-				rsx::coherence_stats::finish_active_mfc_process();
+				rsx::coherence_stats::clear_active_mfc_context();
 				spu_runtime::g_escape(this);
 			}
 

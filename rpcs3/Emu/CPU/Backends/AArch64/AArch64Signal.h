@@ -53,5 +53,6 @@ namespace aarch64
         breakpoint
     };
 
+    u64 _read_ESR_EL1(const ucontext_t* uctx);
     fault_reason decode_fault_reason(const ucontext_t* uctx);
 }

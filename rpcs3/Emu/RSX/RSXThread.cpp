@@ -52,6 +52,217 @@ extern atomic_t<u32> g_lv2_preempts_taken;
 
 LOG_CHANNEL(perf_log, "PERF");
 
+namespace
+{
+	struct cellfault_signature
+	{
+		rsx::coherence_stats::fault_event exemplar{};
+		u64 count = 0;
+		u64 duration_ticks = 0;
+		u64 flush_wait_ticks = 0;
+		u64 gpu_event_wait_ticks = 0;
+		u64 readback_wait_ticks = 0;
+		u64 readback_bytes = 0;
+		u64 section_sync_tag_min = umax;
+		u64 section_sync_tag_max = 0;
+		u64 section_write_tag_min = umax;
+		u64 section_write_tag_max = 0;
+		u64 section_rop_tag_min = umax;
+		u64 section_rop_tag_max = 0;
+
+		bool matches(const rsx::coherence_stats::fault_event& event) const noexcept
+		{
+			const auto& key = exemplar;
+			return key.origin == event.origin &&
+				key.origin_id == event.origin_id &&
+				key.origin_guest_pc == event.origin_guest_pc &&
+				key.origin_block_hash == event.origin_block_hash &&
+				key.fault_pc == event.fault_pc &&
+				key.fault_instruction == event.fault_instruction &&
+				key.is_writing == event.is_writing &&
+				key.renderer_path == event.renderer_path &&
+				key.section_relation_flags == event.section_relation_flags &&
+				key.readback_count == event.readback_count &&
+				key.readback_start == event.readback_start &&
+				key.readback_end == event.readback_end &&
+				key.readback_section_count == event.readback_section_count &&
+				key.readback_section_overflow == event.readback_section_overflow &&
+				key.section_full_start == event.section_full_start &&
+				key.section_full_end == event.section_full_end &&
+				key.section_confirmed_start == event.section_confirmed_start &&
+				key.section_confirmed_end == event.section_confirmed_end &&
+				key.section_locked_start == event.section_locked_start &&
+				key.section_locked_end == event.section_locked_end &&
+				key.section_context == event.section_context &&
+				key.section_protection == event.section_protection &&
+				key.section_read_flags == event.section_read_flags &&
+				key.section_synchronized == event.section_synchronized &&
+				key.fault_address == event.fault_address &&
+				key.mfc.valid == event.mfc.valid &&
+				(!event.mfc.valid ||
+					(key.mfc.spu_id == event.mfc.spu_id &&
+					key.mfc.cmd == event.mfc.cmd &&
+					key.mfc.tag == event.mfc.tag &&
+					key.mfc.flags == event.mfc.flags &&
+					key.mfc.ea == event.mfc.ea &&
+					key.mfc.size == event.mfc.size));
+		}
+
+		void add(const rsx::coherence_stats::fault_event& event) noexcept
+		{
+			if (!count || (!exemplar.readback_count && event.readback_count))
+			{
+				exemplar = event;
+			}
+
+			count++;
+			duration_ticks += event.duration_ticks;
+			flush_wait_ticks += event.flush_wait_ticks;
+			gpu_event_wait_ticks += event.gpu_event_wait_ticks;
+			readback_wait_ticks += event.readback_wait_ticks;
+			readback_bytes += event.readback_bytes;
+
+			if (event.readback_section_count)
+			{
+				section_sync_tag_min = std::min(section_sync_tag_min, event.section_sync_timestamp);
+				section_sync_tag_max = std::max(section_sync_tag_max, event.section_sync_timestamp);
+				section_write_tag_min = std::min(section_write_tag_min, event.section_last_write_tag);
+				section_write_tag_max = std::max(section_write_tag_max, event.section_last_write_tag);
+				section_rop_tag_min = std::min(section_rop_tag_min, event.section_rop_timestamp);
+				section_rop_tag_max = std::max(section_rop_tag_max, event.section_rop_timestamp);
+			}
+		}
+	};
+
+	struct cellfault_interval
+	{
+		u64 count = 0;
+		u64 sequence_first = 0;
+		u64 sequence_last = 0;
+		u64 frame_first = 0;
+		u64 frame_last = 0;
+		u64 ppu = 0;
+		u64 spu = 0;
+		u64 other = 0;
+		u64 reads = 0;
+		u64 writes = 0;
+		u64 texture = 0;
+		u64 zcull = 0;
+		u64 offloader = 0;
+		u64 mfc_valid = 0;
+		u64 mfc_get = 0;
+		u64 mfc_put = 0;
+		u64 mfc_list = 0;
+		u64 mfc_atomic = 0;
+		u64 faults_with_readback = 0;
+		u64 readback_ops = 0;
+		u64 readback_bytes = 0;
+		u64 section_confirmed = 0;
+		u64 section_padding = 0;
+		u64 section_locked_only = 0;
+		u64 section_native_collateral = 0;
+		u64 section_other_lane = 0;
+		u64 section_chain_other = 0;
+		u64 section_multi_unknown = 0;
+		u64 section_faults = 0;
+		u64 section_records = 0;
+		u64 section_overflow = 0;
+		u64 mfc_section_confirmed = 0;
+		u64 mfc_section_full_only = 0;
+		u64 mfc_section_locked_only = 0;
+		u64 mfc_section_outside = 0;
+		u64 section_readback_count_mismatch = 0;
+		u64 readback_range_outside_section = 0;
+		u64 mfc_fault_miss = 0;
+		u64 duration_ticks = 0;
+		u64 flush_wait_ticks = 0;
+		u64 gpu_event_wait_ticks = 0;
+		u64 readback_wait_ticks = 0;
+		u64 vk_probe_ops = 0;
+		u64 flush_wait_ops = 0;
+		u64 gpu_event_wait_ops = 0;
+		u64 readback_wait_ops = 0;
+
+		void add(const rsx::coherence_stats::fault_event& event) noexcept
+		{
+			if (!count)
+			{
+				sequence_first = event.sequence;
+				frame_first = event.frame;
+				frame_last = event.frame;
+			}
+
+			count++;
+			sequence_last = event.sequence;
+			frame_first = std::min(frame_first, event.frame);
+			frame_last = std::max(frame_last, event.frame);
+			reads += !event.is_writing;
+			writes += event.is_writing;
+			texture += !!(event.renderer_path & rsx::coherence_stats::renderer_fault_path_texture);
+			zcull += !!(event.renderer_path & rsx::coherence_stats::renderer_fault_path_zcull);
+			offloader += !!(event.renderer_path & rsx::coherence_stats::renderer_fault_path_offloader);
+			faults_with_readback += event.readback_count != 0;
+			readback_ops += event.readback_count;
+			readback_bytes += event.readback_bytes;
+			section_confirmed += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_access_confirmed);
+			section_padding += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_confirmed_padding);
+			section_locked_only += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_locked_only);
+			section_native_collateral += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_native_collateral);
+			section_other_lane += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_other_4k_lane);
+			section_chain_other += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_chain_or_other);
+			section_multi_unknown += !!(event.section_relation_flags & rsx::coherence_stats::fault_section_multi_unknown);
+			section_faults += event.readback_section_count != 0;
+			section_records += event.readback_section_count;
+			section_overflow += event.readback_section_overflow;
+
+			if (event.mfc.valid && event.readback_section_count &&
+				!(event.section_relation_flags & rsx::coherence_stats::fault_section_multi_unknown))
+			{
+				const bool confirmed = !!(event.section_relation_flags & rsx::coherence_stats::fault_section_access_confirmed);
+				const bool full_only = !!(event.section_relation_flags & rsx::coherence_stats::fault_section_confirmed_padding);
+				const bool locked_only = !!(event.section_relation_flags & rsx::coherence_stats::fault_section_locked_only);
+				const bool outside = !!(event.section_relation_flags & rsx::coherence_stats::fault_section_chain_or_other);
+				mfc_section_confirmed += confirmed;
+				mfc_section_full_only += full_only;
+				mfc_section_locked_only += locked_only;
+				mfc_section_outside += outside;
+			}
+			mfc_fault_miss += event.mfc.valid && !event.mfc_contains_fault;
+			duration_ticks += event.duration_ticks;
+			flush_wait_ticks += event.flush_wait_ticks;
+			gpu_event_wait_ticks += event.gpu_event_wait_ticks;
+			readback_wait_ticks += event.readback_wait_ticks;
+			vk_probe_ops += event.vk_probe_count;
+			flush_wait_ops += event.flush_wait_count;
+			gpu_event_wait_ops += event.gpu_event_wait_count;
+			readback_wait_ops += event.readback_wait_count;
+			section_readback_count_mismatch += event.readback_section_count != event.readback_count;
+
+			if (event.readback_count && event.readback_section_count)
+			{
+				readback_range_outside_section += event.readback_start < event.section_locked_start ||
+					event.readback_end > event.section_locked_end;
+			}
+
+			switch (event.origin)
+			{
+			case rsx::coherence_stats::fault_origin::ppu: ppu++; break;
+			case rsx::coherence_stats::fault_origin::spu: spu++; break;
+			case rsx::coherence_stats::fault_origin::other: other++; break;
+			}
+
+			if (event.mfc.valid)
+			{
+				mfc_valid++;
+				mfc_get += !!(event.mfc.flags & rsx::coherence_stats::mfc_context_get);
+				mfc_put += !!(event.mfc.flags & rsx::coherence_stats::mfc_context_put);
+				mfc_list += !!(event.mfc.flags & rsx::coherence_stats::mfc_context_list);
+				mfc_atomic += !!(event.mfc.flags & rsx::coherence_stats::mfc_context_atomic);
+			}
+		}
+	};
+}
+
 template <>
 bool serialize<rsx::rsx_state>(utils::serial& ar, rsx::rsx_state& o)
 {
@@ -119,7 +330,7 @@ bool serialize<rsx::rsx_iomap_table>(utils::serial& ar, rsx::rsx_iomap_table& o)
 
 namespace rsx
 {
-	std::function<bool(u32 addr, bool is_writing)> g_access_violation_handler;
+	std::function<bool(u32 addr, bool is_writing, const access_violation_info& info)> g_access_violation_handler;
 
 	// TODO: Proper context manager
 	static rsx::context s_ctx{ .rsxthr = nullptr, .register_state = &method_registers };
@@ -696,25 +907,53 @@ namespace rsx
 		coherence_stats::reset();
 		coherence_stats::set_enabled(!!g_cfg.video.debug_overlay);
 
-		g_access_violation_handler = [this](u32 address, bool is_writing)
+		g_access_violation_handler = [this](u32 address, bool is_writing, const access_violation_info& info)
 		{
+			const bool cellstat_enabled = coherence_stats::is_enabled();
+			access_violation_info diagnostic_info = info;
+
+			if (cellstat_enabled)
+			{
+				populate_access_violation_diagnostics(diagnostic_info);
+			}
+
 			auto* counter = &coherence_stats::g_ledger.renderer_fault_other;
+			auto origin = coherence_stats::fault_origin::other;
+			u32 origin_id = 0;
+			u32 origin_guest_pc = umax;
+			u64 origin_lr = 0;
+			u64 origin_block_hash = 0;
 
 			if (const cpu_thread* cpu = get_current_cpu_thread())
 			{
+				if (cellstat_enabled)
+				{
+					origin_id = cpu->id;
+					origin_guest_pc = cpu->get_pc();
+					origin_block_hash = atomic_storage<u64>::load(cpu->block_hash);
+				}
+
 				switch (cpu->get_class())
 				{
 				case thread_class::ppu:
 					counter = &coherence_stats::g_ledger.renderer_fault_ppu;
+					origin = coherence_stats::fault_origin::ppu;
+					if (cellstat_enabled)
+					{
+						origin_lr = atomic_storage<u64>::load(static_cast<const ppu_thread*>(cpu)->lr);
+					}
 					break;
 				case thread_class::spu:
 					counter = &coherence_stats::g_ledger.renderer_fault_spu;
+					origin = coherence_stats::fault_origin::spu;
 					break;
 				default:
 					break;
 				}
 			}
 
+			coherence_stats::scoped_fault_event event(address, is_writing, diagnostic_info.host_pc, diagnostic_info.instruction, diagnostic_info.esr, diagnostic_info.access_size,
+				origin, origin_id, origin_guest_pc, origin_lr, origin_block_hash);
 			coherence_stats::scoped_timer timer(*counter);
 			const bool handled = on_access_violation(address, is_writing);
 
@@ -722,6 +961,8 @@ namespace rsx
 			{
 				timer.cancel();
 			}
+
+			event.finish(handled);
 
 			return handled;
 		};
@@ -3235,6 +3476,7 @@ namespace rsx
 
 	void thread::on_frame_end(u32 buffer, bool forced)
 	{
+		coherence_stats::advance_fault_frame();
 		const bool cellstat_enabled = !!g_cfg.video.debug_overlay;
 		coherence_stats::set_enabled(cellstat_enabled);
 
@@ -3366,7 +3608,7 @@ namespace rsx
 					return coherence_stats::ticks_to_us(value.ticks, frequency);
 				};
 
-				perf_log.notice("CELLSTAT v=1 tsc_hz=%llu av_ppu_n=%llu av_ppu_us=%llu av_spu_n=%llu av_spu_us=%llu av_other_n=%llu av_other_us=%llu vk_probe_n=%llu vk_probe_us=%llu flush_wait_n=%llu flush_wait_us=%llu gpu_event_wait_n=%llu gpu_event_wait_us=%llu readback_wait_n=%llu readback_wait_us=%llu readback_bytes=%llu spu_ch_wait_n=%llu spu_ch_wait_us=%llu spu_mfc_n=%llu spu_mfc_us=%llu",
+				perf_log.notice("CELLSTAT v=2 tsc_hz=%llu av_ppu_n=%llu av_ppu_us=%llu av_spu_n=%llu av_spu_us=%llu av_other_n=%llu av_other_us=%llu vk_probe_n=%llu vk_probe_us=%llu flush_wait_n=%llu flush_wait_us=%llu gpu_event_wait_n=%llu gpu_event_wait_us=%llu readback_wait_n=%llu readback_wait_us=%llu readback_bytes=%llu spu_ch_wait_n=%llu spu_ch_wait_us=%llu",
 					frequency,
 					stats.renderer_fault_ppu.count, to_us(stats.renderer_fault_ppu),
 					stats.renderer_fault_spu.count, to_us(stats.renderer_fault_spu),
@@ -3376,8 +3618,145 @@ namespace rsx
 					stats.gpu_event_wait.count, to_us(stats.gpu_event_wait),
 					stats.gpu_readback_wait.count, to_us(stats.gpu_readback_wait),
 					stats.gpu_readback_bytes,
-					stats.spu_channel_wait.count, to_us(stats.spu_channel_wait),
-					stats.spu_mfc_process.count, to_us(stats.spu_mfc_process));
+					stats.spu_channel_wait.count, to_us(stats.spu_channel_wait));
+
+				constexpr usz signature_capacity = 64;
+				std::array<cellfault_signature, signature_capacity> signatures{};
+				cellfault_interval interval{};
+				usz signature_count = 0;
+				u64 signature_overflow = 0;
+				coherence_stats::fault_event event{};
+
+				while (coherence_stats::g_fault_events.try_pop(event))
+				{
+					interval.add(event);
+
+					usz index = 0;
+					for (; index < signature_count; index++)
+					{
+						if (signatures[index].matches(event))
+						{
+							break;
+						}
+					}
+
+					if (index == signature_count)
+					{
+						if (signature_count == signature_capacity)
+						{
+							signature_overflow++;
+							continue;
+						}
+
+						signature_count++;
+					}
+
+					signatures[index].add(event);
+				}
+
+				static u64 s_fault_event_total = 0;
+				static u64 s_last_fault_dropped = 0;
+				static u64 s_fault_epoch = 0;
+				const u64 fault_epoch = coherence_stats::g_fault_epoch.load(std::memory_order_relaxed);
+
+				if (s_fault_epoch != fault_epoch)
+				{
+					s_fault_epoch = fault_epoch;
+					s_fault_event_total = 0;
+					s_last_fault_dropped = 0;
+				}
+
+				const u64 dropped_total = coherence_stats::g_fault_events.dropped();
+				const u64 dropped_delta = dropped_total - s_last_fault_dropped;
+				s_last_fault_dropped = dropped_total;
+				s_fault_event_total += interval.count;
+
+				perf_log.notice("CELLFAULT_SUM v=1 epoch=%llu interval_n=%llu total_n=%llu seq_first=%llu seq_last=%llu seq_span=%llu frame_min=%llu frame_max=%llu dropped_n=%llu dropped_total=%llu sig_n=%u sig_overflow_n=%llu ppu_n=%llu spu_n=%llu other_n=%llu read_n=%llu write_n=%llu texture_n=%llu zcull_n=%llu offloader_n=%llu mfc_valid_n=%llu mfc_get_n=%llu mfc_put_n=%llu mfc_list_n=%llu mfc_atomic_n=%llu mfc_fault_miss_n=%llu faults_with_readback_n=%llu readback_op_n=%llu readback_bytes=%llu section_fault_n=%llu section_record_n=%llu section_overflow_n=%llu section_readback_mismatch_n=%llu readback_outside_locked_n=%llu section_confirmed_n=%llu section_padding_n=%llu section_locked_only_n=%llu section_native_collateral_n=%llu section_other_lane_n=%llu section_chain_other_n=%llu section_multi_unknown_n=%llu mfc_section_confirmed_n=%llu mfc_section_full_only_n=%llu mfc_section_locked_only_n=%llu mfc_section_outside_n=%llu vk_probe_op_n=%llu flush_wait_op_n=%llu gpu_event_wait_op_n=%llu readback_wait_op_n=%llu duration_us_sum=%llu flush_wait_us_sum=%llu gpu_event_wait_us_sum=%llu readback_wait_us_sum=%llu",
+					fault_epoch, interval.count, s_fault_event_total,
+					interval.sequence_first, interval.sequence_last,
+					interval.count ? interval.sequence_last - interval.sequence_first + 1 : 0,
+					interval.frame_first, interval.frame_last,
+					dropped_delta, dropped_total, static_cast<u32>(signature_count), signature_overflow,
+					interval.ppu, interval.spu, interval.other,
+					interval.reads, interval.writes, interval.texture, interval.zcull, interval.offloader,
+					interval.mfc_valid, interval.mfc_get, interval.mfc_put, interval.mfc_list, interval.mfc_atomic, interval.mfc_fault_miss,
+					interval.faults_with_readback, interval.readback_ops, interval.readback_bytes,
+					interval.section_faults, interval.section_records, interval.section_overflow,
+					interval.section_readback_count_mismatch, interval.readback_range_outside_section,
+					interval.section_confirmed, interval.section_padding, interval.section_locked_only,
+					interval.section_native_collateral, interval.section_other_lane, interval.section_chain_other,
+					interval.section_multi_unknown,
+					interval.mfc_section_confirmed, interval.mfc_section_full_only,
+					interval.mfc_section_locked_only, interval.mfc_section_outside,
+					interval.vk_probe_ops, interval.flush_wait_ops, interval.gpu_event_wait_ops, interval.readback_wait_ops,
+					coherence_stats::ticks_to_us(interval.duration_ticks, frequency),
+					coherence_stats::ticks_to_us(interval.flush_wait_ticks, frequency),
+					coherence_stats::ticks_to_us(interval.gpu_event_wait_ticks, frequency),
+					coherence_stats::ticks_to_us(interval.readback_wait_ticks, frequency));
+
+				std::array<usz, signature_capacity> order{};
+				for (usz i = 0; i < signature_count; i++)
+				{
+					order[i] = i;
+				}
+
+				std::sort(order.begin(), order.begin() + signature_count, [&](usz lhs, usz rhs)
+				{
+					return signatures[lhs].count > signatures[rhs].count;
+				});
+
+				const auto emit_top = [&](coherence_stats::fault_origin origin, u32 limit)
+				{
+					u32 rank = 0;
+
+					for (usz i = 0; i < signature_count && rank < limit; i++)
+					{
+						const auto& signature = signatures[order[i]];
+						const auto& sample = signature.exemplar;
+
+						if (sample.origin != origin)
+						{
+							continue;
+						}
+
+						rank++;
+						const u64 mfc_end = sample.mfc.valid && sample.mfc.size ?
+							static_cast<u64>(sample.mfc.ea) + sample.mfc.size - 1 : sample.mfc.ea;
+
+						perf_log.notice("CELLFAULT_TOP v=1 origin=%u rank=%u n=%llu seq=%llu frame=%llu tsc=%llu fault=0x%08x native16k=0x%08x lane4k=%u rw=%u host_pc=0x%llx insn=0x%08x esr=0x%llx access_size=%u guest_pc=0x%08x guest_lr=0x%llx guest_block=0x%llx mfc_valid=%u mfc_spu=0x%08x mfc_ea=0x%08x mfc_end=0x%llx mfc_size=%u mfc_cmd=0x%02x mfc_tag=%u mfc_flags=0x%02x mfc_contains_fault=%u access=0x%08x-0x%08x path=0x%02x relation=0x%08x duration_us_sum=%llu duration_us_sample=%llu flush_wait_us_sum=%llu gpu_event_wait_us_sum=%llu readback_wait_us_sum=%llu readback_bytes_sum=%llu sample_flush_wait_n=%u sample_flush_start=%llu sample_flush_end=%llu sample_gpu_wait_n=%u sample_gpu_start=%llu sample_gpu_end=%llu sample_readback_wait_n=%u sample_readback_start_tsc=%llu sample_readback_end_tsc=%llu sample_readback_n=%u sample_readback_start=0x%08x sample_readback_end=0x%08x sample_readback_bytes=%llu section_n=%u section_overflow=%u section_full=0x%08x-0x%08x section_confirmed=0x%08x-0x%08x section_locked=0x%08x-0x%08x section_context=0x%x section_protection=%u section_read_flags=%u section_synchronized=%u section_sync_tag=%llu section_write_tag=%llu section_rop_tag=%llu section_sync_tag_min=%llu section_sync_tag_max=%llu section_write_tag_min=%llu section_write_tag_max=%llu section_rop_tag_min=%llu section_rop_tag_max=%llu",
+							static_cast<u32>(sample.origin), rank, signature.count,
+							sample.sequence, sample.frame, sample.timestamp_ticks,
+							sample.fault_address, sample.fault_address & -0x4000, (sample.fault_address >> 12) & 3,
+							sample.is_writing, sample.fault_pc, sample.fault_instruction, sample.fault_esr, sample.fault_access_size,
+							sample.origin_guest_pc, sample.origin_lr, sample.origin_block_hash,
+							sample.mfc.valid, sample.mfc.spu_id, sample.mfc.ea, mfc_end, sample.mfc.size,
+							sample.mfc.cmd, sample.mfc.tag, sample.mfc.flags,
+							sample.mfc_contains_fault, sample.access_start, sample.access_end,
+							sample.renderer_path, sample.section_relation_flags,
+							coherence_stats::ticks_to_us(signature.duration_ticks, frequency),
+							coherence_stats::ticks_to_us(sample.duration_ticks, frequency),
+							coherence_stats::ticks_to_us(signature.flush_wait_ticks, frequency),
+							coherence_stats::ticks_to_us(signature.gpu_event_wait_ticks, frequency),
+							coherence_stats::ticks_to_us(signature.readback_wait_ticks, frequency),
+							signature.readback_bytes,
+							sample.flush_wait_count, sample.flush_wait_start, sample.flush_wait_end,
+							sample.gpu_event_wait_count, sample.gpu_event_wait_start, sample.gpu_event_wait_end,
+							sample.readback_wait_count, sample.readback_wait_start, sample.readback_wait_end,
+							sample.readback_count, sample.readback_start, sample.readback_end, sample.readback_bytes,
+							sample.readback_section_count, sample.readback_section_overflow,
+							sample.section_full_start, sample.section_full_end,
+							sample.section_confirmed_start, sample.section_confirmed_end,
+							sample.section_locked_start, sample.section_locked_end,
+							sample.section_context, sample.section_protection, sample.section_read_flags, sample.section_synchronized,
+							sample.section_sync_timestamp, sample.section_last_write_tag, sample.section_rop_timestamp,
+							signature.section_sync_tag_min, signature.section_sync_tag_max,
+							signature.section_write_tag_min, signature.section_write_tag_max,
+							signature.section_rop_tag_min, signature.section_rop_tag_max);
+					}
+				};
+
+				emit_top(coherence_stats::fault_origin::ppu, 2);
+				emit_top(coherence_stats::fault_origin::spu, 6);
 			}
 		}
 	}

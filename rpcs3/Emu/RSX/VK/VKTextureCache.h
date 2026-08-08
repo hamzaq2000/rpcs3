@@ -282,7 +282,7 @@ namespace vk
 
 			// Synchronize, reset dma_fence after waiting
 			{
-				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.gpu_readback_wait);
+				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.gpu_readback_wait, nullptr, rsx::coherence_stats::fault_timing::readback_wait);
 				vk::wait_for_event(dma_fence.get(), GENERAL_WAIT_TIMEOUT);
 			}
 
@@ -298,8 +298,18 @@ namespace vk
 				flush_length = std::min(max_content_size, available_tile_size);
 			}
 
+			const auto& full_range = get_section_range();
+			const auto& confirmed_range = get_confirmed_range();
+			const auto& locked_range = get_locked_range();
+			rsx::coherence_stats::record_readback_section(
+				full_range.start, full_range.end,
+				confirmed_range.start, confirmed_range.end,
+				locked_range.start, locked_range.end,
+				static_cast<u32>(get_context()), static_cast<u8>(get_protection()), static_cast<u8>(get_memory_read_flags()),
+				is_synchronized(), get_sync_timestamp(), last_write_tag, rsx::get_current_renderer()->ROP_sync_timestamp);
+
 			vk::flush_dma(range.start, flush_length);
-			rsx::coherence_stats::record_readback_bytes(flush_length);
+			rsx::coherence_stats::record_readback_range(range.start, flush_length);
 
 #if DEBUG_DMA_TILING
 			// Are we a tiled region?
