@@ -1638,7 +1638,6 @@ public:
 			return compile_interpreter();
 		}
 
-		const u32 start0 = _func.entry_point;
 		const usz func_size = _func.data.size();
 
 		const auto add_loc = m_spurt->add_empty(std::move(_func));
@@ -1650,15 +1649,11 @@ public:
 
 		const spu_program& func = add_loc->data;
 
-		if (func.entry_point != start0)
-		{
-			// Wait for the duplicate
-			while (!add_loc->compiled)
-			{
-				add_loc->compiled.wait(nullptr);
-			}
+		spu_item::llvm_compile_claim llvm_compile{*add_loc};
 
-			return add_loc->compiled;
+		if (!llvm_compile.owns_compile())
+		{
+			return ensure(add_loc->compiled.load());
 		}
 
 		bool add_to_file = false;
@@ -3979,12 +3974,6 @@ public:
 #if defined(__APPLE__)
 		pthread_jit_write_protect_np(true);
 #endif
-#if defined(ARCH_ARM64)
-		// Flush all cache lines after potentially writing executable code
-		asm("ISB");
-		asm("DSB ISH");
-#endif
-
 		if (auto& cache = g_fxo->get<spu_cache>())
 		{
 			if (add_to_file)
@@ -3995,6 +3984,7 @@ public:
 			spu_log.success("New SPU block compiled successfully (size=%u)", func_size);
 		}
 
+		llvm_compile.mark_succeeded();
 		return fn;
 	}
 

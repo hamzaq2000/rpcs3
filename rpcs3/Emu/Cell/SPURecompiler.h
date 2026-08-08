@@ -79,11 +79,48 @@ void spu_llvm_set_compile_context(spu_llvm_compile_context* context) noexcept;
 class spu_item
 {
 public:
+	enum class llvm_compile_state : u32
+	{
+		idle,
+		compiling,
+		ready,
+	};
+
 	// SPU program
 	const spu_program data;
 
 	// Compiled function pointer
 	atomic_t<spu_function_t> compiled = nullptr;
+
+	// LLVM readiness is separate from compiled: spu_fast installs an
+	// interpreter-backed function before asynchronously upgrading it to LLVM.
+	atomic_t<llvm_compile_state> llvm_state = llvm_compile_state::idle;
+
+	class llvm_compile_claim
+	{
+	public:
+		explicit llvm_compile_claim(spu_item& item);
+
+		~llvm_compile_claim();
+
+		llvm_compile_claim(const llvm_compile_claim&) = delete;
+		llvm_compile_claim& operator=(const llvm_compile_claim&) = delete;
+
+		[[nodiscard]] bool owns_compile() const noexcept
+		{
+			return m_owner;
+		}
+
+		void mark_succeeded() noexcept
+		{
+			m_succeeded = true;
+		}
+
+	private:
+		atomic_t<llvm_compile_state>& m_state;
+		bool m_owner = false;
+		bool m_succeeded = false;
+	};
 
 	// Ubertrampoline generated for this item when it was latest
 	atomic_t<spu_function_t> trampoline = nullptr;

@@ -222,6 +222,30 @@ public:
 		bool push(cpu_thread* _this) noexcept;
 	};
 
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+	// Keeps all guest CPU threads paused while long-running host work is performed
+	// by the requesting CPU thread without holding the suspend_all registry lock.
+	class runtime_compile_guard
+	{
+		cpu_thread* m_owner = nullptr;
+
+	public:
+		explicit runtime_compile_guard(cpu_thread* owner) noexcept;
+		runtime_compile_guard(const runtime_compile_guard&) = delete;
+		runtime_compile_guard& operator=(const runtime_compile_guard&) = delete;
+		~runtime_compile_guard();
+
+		// Release the gate and process any CPU state raised while compiling.
+		// Returns false when the requesting CPU must stop instead of resuming JIT code.
+		bool release() noexcept;
+
+		explicit operator bool() const noexcept
+		{
+			return m_owner != nullptr;
+		}
+	};
+#endif
+
 	// Suspend all threads and execute op (may be executed by other thread than caller!)
 	template <u8 Prio = 0, typename F>
 	static auto suspend_all(cpu_thread* _this, std::initializer_list<void*> hints, F op)
@@ -301,6 +325,11 @@ public:
 	}
 
 private:
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+	static bool acquire_runtime_compile(cpu_thread* owner) noexcept;
+	static bool release_runtime_compile(cpu_thread* owner) noexcept;
+#endif
+
 	static thread_local cpu_thread* g_tls_this_thread;
 };
 

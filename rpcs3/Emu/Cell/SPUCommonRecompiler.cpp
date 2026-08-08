@@ -1396,6 +1396,42 @@ spu_runtime::spu_runtime()
 	}
 }
 
+spu_item::llvm_compile_claim::llvm_compile_claim(spu_item& item)
+	: m_state(item.llvm_state)
+{
+	for (;;)
+	{
+		if (m_state.compare_and_swap_test(llvm_compile_state::idle, llvm_compile_state::compiling))
+		{
+			m_owner = true;
+			return;
+		}
+
+		const auto state = m_state.load();
+
+		if (state == llvm_compile_state::ready)
+		{
+			return;
+		}
+
+		if (state == llvm_compile_state::compiling)
+		{
+			m_state.wait(llvm_compile_state::compiling);
+		}
+	}
+}
+
+spu_item::llvm_compile_claim::~llvm_compile_claim()
+{
+	if (!m_owner)
+	{
+		return;
+	}
+
+	m_state.release(m_succeeded ? llvm_compile_state::ready : llvm_compile_state::idle);
+	m_state.notify_all();
+}
+
 spu_item* spu_runtime::add_empty(spu_program&& data)
 {
 	if (data.data.empty())
@@ -1967,6 +2003,9 @@ spu_function_t spu_runtime::rebuild_ubertrampoline(u32 id_inst)
 		}
 
 		workload.clear();
+#if defined(ARCH_ARM64)
+		asmjit::VirtMem::flushInstructionCache(wxptr, raw - wxptr);
+#endif
 		result = reinterpret_cast<spu_function_t>(reinterpret_cast<u64>(wxptr));
 
 		std::string fname;
@@ -2113,9 +2152,7 @@ spu_function_t spu_runtime::make_branch_patchpoint(u16 data) const
 	pthread_jit_write_protect_np(true);
 #endif
 
-	// Flush all cache lines after potentially writing executable code
-	asm("ISB");
-	asm("DSB ISH");
+	asmjit::VirtMem::flushInstructionCache(patch_fn, raw - patch_fn);
 
 	return reinterpret_cast<spu_function_t>(patch_fn);
 #else
@@ -2181,9 +2218,7 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 		pthread_jit_write_protect_np(true);
 #endif
 
-		// Flush all cache lines after potentially writing executable code
-		asm("ISB");
-		asm("DSB ISH");
+		asmjit::VirtMem::flushInstructionCache(rip, sizeof(result));
 #else
 #error "Unimplemented"
 #endif
@@ -2196,8 +2231,6 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 		return;
 	}
 
-	spu.jit->init();
-
 	// Compile
 	if (spu._ref<u32>(spu.pc) == 0u)
 	{
@@ -2205,14 +2238,43 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 		return;
 	}
 
+	spu_function_t func = nullptr;
+
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+	// Keep guest CPUs synchronized while this SPU is stalled on runtime
+	// compilation, but compile on this host thread outside the CPU registry lock.
+	cpu_thread::runtime_compile_guard compile_guard{&spu};
+
+	if (!compile_guard)
+	{
+		spu_runtime::g_escape(&spu);
+		return;
+	}
+
+	{
+		jit_write_guard write_guard;
+		spu.jit->init();
+		const auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
+		func = compile_spu_llvm_with_retry(spu.jit, program);
+	}
+
+	if (!compile_guard.release())
+	{
+		return;
+	}
+#else
+	spu.jit->init();
+
 #if defined(__APPLE__)
 	pthread_jit_write_protect_np(false);
 #endif
 	auto program = spu.jit->analyse(spu._ptr<u32>(0), spu.pc);
-#ifdef ARCH_ARM64
-	const auto func = compile_spu_llvm_with_retry(spu.jit, program);
+
+#if defined(ARCH_ARM64)
+	func = compile_spu_llvm_with_retry(spu.jit, program);
 #else
-	const auto func = spu.jit->compile(std::move(program));
+	func = spu.jit->compile(std::move(program));
+#endif
 #endif
 
 	if (!func)
@@ -2231,15 +2293,10 @@ void spu_recompiler_base::dispatch(spu_thread& spu, void*, u8* rip)
 			spu_log.trace("Called from 0x%x", _info._u32[2] - 4);
 		}
 	}
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(ARCH_ARM64)
 	pthread_jit_write_protect_np(true);
 #endif
 
-#if defined(ARCH_ARM64)
-	// Flush all cache lines after potentially writing executable code
-	asm("ISB");
-	asm("DSB ISH");
-#endif
 	spu_runtime::g_tail_escape(&spu, func, nullptr);
 }
 
@@ -2329,9 +2386,7 @@ void spu_recompiler_base::branch(spu_thread& spu, void*, u8* rip)
 	pthread_jit_write_protect_np(true);
 #endif
 
-	// Flush all cache lines after potentially writing executable code
-	asm("ISB");
-	asm("DSB ISH");
+	asmjit::VirtMem::flushInstructionCache(rip, sizeof(result));
 #else
 #error "Unimplemented"
 #endif

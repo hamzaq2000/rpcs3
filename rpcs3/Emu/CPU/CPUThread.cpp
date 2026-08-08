@@ -511,6 +511,12 @@ static atomic_t<u64, 128> s_cpu_counter{0};
 // Linked list of pushed tasks for suspend_all
 static atomic_t<cpu_thread::suspend_work*> s_pushed{};
 
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+// Requesting CPU allowed to perform host-side runtime compilation while every
+// other registered guest CPU remains at a check_state() safe point.
+static atomic_t<cpu_thread*> s_runtime_compile_owner{};
+#endif
+
 // Lock for suspend_all operations
 static shared_mutex s_cpu_lock;
 
@@ -708,6 +714,15 @@ void cpu_thread::operator()()
 
 			g_tls_log_control = [](const char*, u64){};
 
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+			// Do not leave other guest CPUs waiting if a runtime compiler exits
+			// without unwinding its local guard.
+			if (s_runtime_compile_owner.compare_and_swap_test(_this, nullptr))
+			{
+				s_runtime_compile_owner.notify_all();
+			}
+#endif
+
 			if (s_tls_thread_slot != umax)
 			{
 				cpu_counter::remove(_this);
@@ -836,6 +851,12 @@ bool cpu_thread::check_state() noexcept
 
 	while (true)
 	{
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+		cpu_thread* runtime_compile_owner = nullptr;
+		bool runtime_compile_wait = false;
+		bool registered_now = false;
+#endif
+
 		// Process all flags in a single atomic op
 		bs_t<cpu_flag> state1;
 		auto state0 = state.fetch_op([&](bs_t<cpu_flag>& flags)
@@ -923,11 +944,20 @@ bool cpu_thread::check_state() noexcept
 				}
 			}
 
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+			runtime_compile_owner = s_runtime_compile_owner.load();
+			runtime_compile_wait = s_tls_thread_slot != umax && runtime_compile_owner && runtime_compile_owner != this;
+#endif
+
 			// Atomically clean wait flag and escape
 			if (!is_stopped(flags) && flags.none_of(cpu_flag::ret))
 			{
 				// Check pause flags which hold thread inside check_state (ignore suspend/debug flags on cpu_flag::temp)
-				if (flags & cpu_flag::pause || (!cpu_memory_checked && flags & cpu_flag::memory) || (cpu_can_stop && flags & (cpu_flag::dbg_global_pause + cpu_flag::dbg_pause + cpu_flag::suspend + cpu_flag::yield + cpu_flag::preempt)))
+				if (flags & cpu_flag::pause
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+					|| runtime_compile_wait
+#endif
+					|| (!cpu_memory_checked && flags & cpu_flag::memory) || (cpu_can_stop && flags & (cpu_flag::dbg_global_pause + cpu_flag::dbg_pause + cpu_flag::suspend + cpu_flag::yield + cpu_flag::preempt)))
 				{
 					if (!(flags & cpu_flag::wait))
 					{
@@ -963,6 +993,9 @@ bool cpu_thread::check_state() noexcept
 
 					// Restore thread in the suspend list
 					cpu_counter::add(this);
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+					registered_now = true;
+#endif
 				}
 
 				retval = false;
@@ -1020,6 +1053,20 @@ bool cpu_thread::check_state() noexcept
 				cpu_memory_checked = false;
 				continue;
 			}
+
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+			// cpu_counter::add() may have blocked behind the short suspend_all
+			// handshake after this iteration first observed an inactive gate.
+			// Recheck after registration and mandatory VM lock handoff before
+			// allowing guest code to run.
+			if (!retval && registered_now)
+			{
+				if (const auto owner = s_runtime_compile_owner.load(); owner && owner != this)
+				{
+					continue;
+				}
+			}
+#endif
 
 			if (cpu_can_stop && state0 & cpu_flag::pending)
 			{
@@ -1107,6 +1154,20 @@ bool cpu_thread::check_state() noexcept
 
 				continue;
 			}
+
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+			if (runtime_compile_wait)
+			{
+				// Suspend/debug handling, VM lock release, and transient
+				// suspend_all completion take priority over this host-work gate.
+				if (const auto owner = s_runtime_compile_owner.load(); owner && owner != this)
+				{
+					s_runtime_compile_owner.wait(owner, atomic_wait_timeout{10'000'000});
+				}
+
+				continue;
+			}
+#endif
 
 			if (state0 & cpu_flag::yield && cpu_can_stop)
 			{
@@ -1391,6 +1452,100 @@ void cpu_thread::dump_misc(std::string& ret, std::any& /*custom_data*/) const
 {
 	fmt::append(ret, "%s[0x%x]; State: %s\n", get_class() == thread_class::ppu ? "PPU" : get_class() == thread_class::spu ? "SPU" : "RSX", id, state.load());
 }
+
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+cpu_thread::runtime_compile_guard::runtime_compile_guard(cpu_thread* owner) noexcept
+{
+	if (cpu_thread::acquire_runtime_compile(owner))
+	{
+		m_owner = owner;
+	}
+}
+
+cpu_thread::runtime_compile_guard::~runtime_compile_guard()
+{
+	static_cast<void>(release());
+}
+
+bool cpu_thread::runtime_compile_guard::release() noexcept
+{
+	if (cpu_thread* owner = std::exchange(m_owner, nullptr))
+	{
+		return cpu_thread::release_runtime_compile(owner);
+	}
+
+	return true;
+}
+
+bool cpu_thread::acquire_runtime_compile(cpu_thread* owner) noexcept
+{
+	if (!owner)
+	{
+		return false;
+	}
+
+	for (;;)
+	{
+		if (thread_ctrl::state() == thread_state::aborting || owner->is_stopped())
+		{
+			return false;
+		}
+
+		if (const auto current = s_runtime_compile_owner.load())
+		{
+			// Recursive use would otherwise spin because the owner is deliberately
+			// exempt from its own gate.
+			if (current == owner)
+			{
+				return false;
+			}
+
+			if (owner->check_state())
+			{
+				return false;
+			}
+
+			continue;
+		}
+
+		// Publish the gate only after suspend_all has observed every currently
+		// registered CPU in its waiting state. The callback stays short.
+		const bool acquired = suspend_all(owner, {}, [owner]
+		{
+			return s_runtime_compile_owner.compare_and_swap_test(nullptr, owner);
+		});
+
+		if (!acquired)
+		{
+			continue;
+		}
+
+		// Ordinary suspend_all operations may now treat the compiler as already
+		// quiescent while it performs host-only work outside s_cpu_lock.
+		owner->state += cpu_flag::wait;
+
+		if (thread_ctrl::state() == thread_state::aborting || owner->is_stopped())
+		{
+			static_cast<void>(release_runtime_compile(owner));
+			return false;
+		}
+
+		return true;
+	}
+}
+
+bool cpu_thread::release_runtime_compile(cpu_thread* owner) noexcept
+{
+	if (s_runtime_compile_owner.compare_and_swap_test(owner, nullptr))
+	{
+		s_runtime_compile_owner.notify_all();
+	}
+
+	// Clear the advertised wait flag through the normal state machine. This
+	// also propagates a pause, stop, or exit raised during compilation.
+	return !owner->check_state();
+}
+#endif
 
 bool cpu_thread::suspend_work::push(cpu_thread* _this) noexcept
 {

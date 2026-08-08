@@ -257,7 +257,10 @@ namespace utils
 #ifdef __APPLE__
 		const int jit_flag = is_memory_mapping || !can_be_jit ? 0 : MAP_JIT;
 #ifdef ARCH_ARM64
-		auto ptr = ::mmap(use_addr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | jit_flag | c_map_noreserve, -1, 0);
+		// Guest-memory reservations are replaced by file-backed mappings as pages are
+		// allocated. Keep their untouched ranges inaccessible so invalid accesses fault.
+		const int initial_prot = is_memory_mapping ? PROT_NONE : PROT_READ | PROT_WRITE;
+		auto ptr = ::mmap(use_addr, size, initial_prot, MAP_ANON | MAP_PRIVATE | jit_flag | c_map_noreserve, -1, 0);
 #else
 		auto ptr = ::mmap(use_addr, size, PROT_NONE, MAP_ANON | MAP_PRIVATE | jit_flag | c_map_noreserve, -1, 0);
 #endif

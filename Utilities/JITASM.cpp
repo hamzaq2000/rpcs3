@@ -250,6 +250,13 @@ void* jit_runtime_base::_add(asmjit::CodeHolder* code, usz align) noexcept
 		}
 	}
 
+#if defined(ARCH_ARM64) && defined(__APPLE__)
+	// The AsmJit protection scope above normally flushes the instruction cache
+	// when it restores executable access. Apple manages W^X outside this helper,
+	// so publish the copied code explicitly before any thread can execute it.
+	asmjit::VirtMem::flushInstructionCache(p, codeSize);
+#endif
+
 	return p;
 }
 
@@ -326,16 +333,15 @@ void jit_runtime::finalize() noexcept
 	s_data_pos = 0;
 
 	// Restore code/data snapshot
-	std::memcpy(alloc(s_code_init.size(), 1, true), s_code_init.data(), s_code_init.size());
+	u8* const restored_code = alloc(s_code_init.size(), 1, true);
+	std::memcpy(restored_code, s_code_init.data(), s_code_init.size());
 	std::memcpy(alloc(s_data_init.size(), 1, false), s_data_init.data(), s_data_init.size());
 
 #ifdef __APPLE__
 	pthread_jit_write_protect_np(true);
 #endif
 #ifdef ARCH_ARM64
-	// Flush all cache lines after potentially writing executable code
-	asm("ISB");
-	asm("DSB ISH");
+	asmjit::VirtMem::flushInstructionCache(restored_code, s_code_init.size());
 #endif
 }
 
