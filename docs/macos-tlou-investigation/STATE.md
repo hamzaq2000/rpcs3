@@ -331,31 +331,42 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     busy skips, and total/maximum recount duration. The directory is not yet
     consulted by MFC or any other behavioral path. Its eight focused tests pass;
     all 206 enabled tests pass, with two existing tests disabled.
+37. The accepted ownership-summary capture at `cbe0b7960` passes the bounded
+    live gate. Its 45.116754-second interval contains 825 frame periods
+    (18.2859 FPS). The first-to-last `CELLDIR` interior spans 815 frames in
+    44.560866 seconds, with 8,412 accepted read probes and nine exact recounts.
+    It adds zero handled inconclusive or clear probes and records zero recount
+    mismatch, missing/excess reference, poison, expected-count overflow,
+    mutation error, sequence error, or cache-busy scan. The final recount
+    matches 31 live sections, 5,548 owner references, and 4,983 granules
+    exactly. The recounts averaged 364.444 us and peaked at 441 us in the
+    interval (645 us lifetime maximum). Four of more than 25,000 probes over
+    the complete run fell back
+    conservatively as inconclusive—two before and two after the interval—with
+    zero stable-clear result, mismatch, or poison. This does not invalidate the
+    accepted window or require another bedroom-only summary run. Full artifact
+    identity and boundaries are in `OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`.
 
 ## Current blocker
 
-The behavior-neutral ownership summary needs one bounded live validation before
-it can support the exact GET ticket. Require at least one completed recount and
-zero mismatched granules, missing/excess references, poisoned granules, global
-poison, expected-count overflow, owner-count underflow/overflow, abandoned
-mutations, sequence errors, and inconclusive handled-fault probes.
-`handled_clear_n` is an attribution alarm requiring investigation, not by
-itself proof that the directory is corrupt: the read-fault callback can be
-handled by a source outside the texture-cache `NO`-owner model. Record
-`recount_busy_n` and recount total/maximum duration so a skipped cache try-lock
-or expensive scan is visible rather than mistaken for a correctness failure.
+The behavior-neutral ownership summary has passed its bounded live proof; no
+repeat bedroom-only summary run is needed. Before it controls an access
+decision, add a quiescent reset that rebuilds or clears state at a proven
+renderer lifecycle boundary and add integration tests that exercise real
+buffered-section protection, confirmed-range protection, range expansion, and
+discard transitions.
 
-If that run passes, implement the game-general, generation-keyed synchronous
-GET ticket/shadow path. Before the ownership summary controls behavior, add a
-quiescent reset that rebuilds or clears live state at a proven lifecycle
-boundary and add buffered-section integration tests covering real protection,
-range-expansion, and discard transitions. The behavioral path must resolve and
-pin exact owners under the correct cache lifetime, retain safe fallbacks for
-VM/ZCULL/unsupported cases, and keep the ordinary MFC negative path to a few
-allocation-free local loads. Use the bedroom for this bounded proof and later
-functional/A-B validation, then validate the semantic mechanism in distinct
-TLoU scenes. No production decision may key on an observed address, PC,
-section identity, cadence, or bedroom signature.
+After those prerequisites pass, implement the smallest game-general,
+generation-keyed synchronous exact-GET ticket/shadow path. It must resolve and
+pin exact owners under the correct cache lifetime, preserve same-native-page
+sibling protection, retain the existing path for VM/ZCULL/atomic/Raw-SPU,
+unsupported, and ambiguous cases, and keep the ordinary MFC negative path to a
+few allocation-free local loads. The four complete-run inconclusive probes
+demonstrate the conservative fallback and must remain fallbacks, not be promoted
+to clear. Use the bedroom for functional validation and a later overlay-off
+A/B, then validate the semantic mechanism in distinct TLoU scenes. No
+production decision may key on an observed address, PC, transfer size, section
+identity, cadence, or bedroom signature.
 
 Direct PPU JIT accesses still rely on host protection and remain a later
 producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
@@ -401,6 +412,12 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   Busy-scan cadence and recount duration are explicit telemetry. It changes no
   access decision and supplies neither VM/ZCULL safety nor a section lifetime
   pin.
+- Accepted `cbe0b7960` ownership-summary capture in
+  `OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`: 8,412 accepted reads, nine exact
+  recounts, and an exact 5,548-reference/4,983-granule final match with no
+  interval mismatch, poison, mutation error, clear, or inconclusive result.
+  Four of more than 25,000 whole-run probes conservatively fell back as
+  inconclusive outside the interval; no repeat run is required.
 
 The ownership summary's eight focused tests and all 206 enabled tests pass;
 two existing tests remain disabled. The 198-test result above belongs to the
@@ -448,6 +465,15 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   `f0730fe13f3e5dbaf3202fc2af764fa2402615fd0618f35a02ca0b07c19604a6`,
   and post-window stack-sample SHA-256 is
   `35607eedf560d1ecdbd6eeef3a89a265ff5dfdf164fcc2dcca0a137aa5eb5331`.
+- The accepted ownership-summary capture is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/cellown-2026-08-08-cbe0b796`.
+  Its manifest SHA-256 is
+  `05a185f6ec92d944eec218900484d97badd38b101efcb09a761d707f3be6a096`,
+  full `RPCS3.log` SHA-256 is
+  `0d7574333f25f0f5f96025c93b30c24496c6d71a98fdcef6e7321dfa87f598c7`,
+  exact interval SHA-256 is
+  `712fa924c1de170d9616ddf11a4e765bfb2d37268042d1b9dea6c58ce0ff4dbf`,
+  and its exact source byte range is `[13408737, 14870766)`.
 - The final renderer profile is
   `home-release-lto-feedback-copy-edge`; it ran windowed with Strict Off,
   `Force Framebuffer Feedback Copies` On, and the Release+ThinLTO binary.

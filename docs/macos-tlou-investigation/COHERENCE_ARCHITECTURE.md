@@ -187,19 +187,30 @@ recounts, missing/excess references, poisoned granules and global poison,
 expected-count overflow, mutation underflow/overflow, abandoned mutations,
 sequence errors, cache-busy skips, and total/maximum recount duration.
 
-The live proof gate is at least one completed recount and zero mismatch,
-missing/excess references, poison, expected-count overflow, owner
-underflow/overflow, abandoned mutations, sequence errors, and handled-fault
-inconclusive results. A nonzero `handled_clear_n` is an attribution alarm to
-explain, not automatically directory corruption, because the callback can
-handle protection sources outside this texture-owner summary. A nonzero
-`recount_busy_n` records a skipped try-lock; it is useful cadence evidence and
-does not itself fail correctness.
+The bounded live proof at `cbe0b7960` passes. Its marker window contains 825
+periods in 45.116754 seconds (18.2859 FPS). The clean first-to-last `CELLDIR`
+interior spans 815 frames in 44.560866 seconds, with 8,412
+texture-handler-accepted read probes, all classified `maybe_texture`, and nine
+exact recounts. It adds zero handled clear or inconclusive probes and records
+zero mismatch, missing/excess reference, poison, expected-count overflow,
+owner underflow/overflow, abandoned mutation, sequence error, or cache-busy
+scan. The final recount matches 31 sections, 5,548 owner references, and 4,983
+granules exactly. Recounts averaged 364.444 us and peaked at 441 us in the
+interval.
+
+Across the complete run, four of more than 25,000 probes conservatively fell
+back as inconclusive—two before and two after the accepted window. No stable
+clear, mismatch, or poison occurred. Inconclusive preserves the old path, so
+these rare observations validate the required fallback rather than creating a
+false negative. The exact boundary and artifact identity are in
+`OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`; another bedroom-only summary run is
+not required.
 
 Eight focused directory tests and all 206 enabled tests pass; two existing
-tests remain disabled. Before this summary controls behavior, it still requires
-a quiescent reset/rebuild at a proven lifecycle boundary and buffered-section
-integration tests that exercise real protect, range expansion, and discard
+tests remain disabled. The summary nevertheless remains behavior-neutral.
+Before it controls behavior, the current blocker is a quiescent reset/rebuild
+at a proven renderer lifecycle boundary plus integration tests that exercise
+real protect, confirmed-range protect, range expansion, and discard
 transitions.
 
 Separate logical ownership and synchronized content state from trap
@@ -240,11 +251,10 @@ Raw-SPU MMIO, ZCULL, ambiguous ownership, and unsupported mappings retain the
 existing behavior until separately proven. MFC tag and barrier completion must
 remain observationally identical.
 
-Focused tests must cover buffered-section lifecycle integration, lifetime
-races, sibling protection, invalidation, generation wrap, list elements, and
-MFC ordering before a behavioral game launch. A quiescent reset/rebuild must
-also prevent stale counts from crossing renderer lifetimes. The synchronous
-ticket is an enabling prototype. Continue only if it materially
+After the reset and transition-test prerequisite, focused ticket tests must
+cover lifetime races, sibling protection, invalidation, generation wrap,
+normal and list GETs, and MFC ordering before a behavioral game launch. The
+synchronous ticket is an enabling prototype. Continue only if it materially
 reduces handled GET faults and flush handoffs without moving the same cost into
 channel/MFC waits. Bedroom validation is followed by distinct gameplay scenes;
 a bedroom-only win is rejected.

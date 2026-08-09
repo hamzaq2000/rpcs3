@@ -27,6 +27,8 @@ fault-oracle capture and its exact validity boundary are recorded in
 [`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md); the
 live-validated oracle-v2 capture and architecture decision are in
 [`FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`](FAULT_ORACLE_V2_CAPTURE_E0BE3532.md).
+The accepted live proof of the behavior-preserving ownership summary is in
+[`OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`](OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md).
 
 Important measurement rules:
 
@@ -61,14 +63,20 @@ herd of already-synchronized GET faults responsible for 73.65% of flush wait.
 The first behavior-preserving part of that direction is implemented in
 `44f581fb1`: a fixed 16 KiB summary of texture-cache `NO` owners, maintained
 from the common buffered-section lifecycle and checked against an exact
-debug-only recount.
-Its stable probe is only a conservative negative hint about texture-cache
+debug-only recount. In the accepted `cbe0b7960` marker window, the clean
+first-to-last `CELLDIR` interior covered 8,412 accepted read probes and nine
+exact recounts with zero new inconclusive probes, clear results, mismatch,
+poison, mutation error, or cache-busy scan. Its final recount matched 5,548
+owner references across 4,983 granules exactly. Across the whole run, four of
+more than 25,000 probes conservatively fell back as inconclusive; none produced
+a stable clear. Another bedroom ownership-summary run is not needed.
+
+The stable probe remains only a conservative negative hint about texture-cache
 ownership; it does not prove VM or ZCULL safety and does not pin a section or
-protection lifetime. Read-fault and recount telemetry can validate the summary,
-but no result currently changes emulation behavior. The next bounded step is
-one live proof run, followed—only if its gates pass—by the generation-keyed
-exact GET ticket/shadow mechanism. More bedroom-only attribution is not the
-blocker.
+protection lifetime. No result in this checkpoint changes emulation behavior.
+The immediate blocker is a quiescent lifecycle reset plus real buffered-section
+transition tests; after those pass, implement the game-general,
+generation-keyed synchronous exact GET ticket/shadow mechanism.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,
