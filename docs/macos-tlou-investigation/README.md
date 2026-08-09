@@ -31,6 +31,9 @@ The accepted live proof of the behavior-preserving ownership summary is in
 [`OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`](OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md).
 The decisive zero-hit runtime result for the first collateral-GET receipt is in
 [`COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`](COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md).
+The exact current-source design and one-run decision protocol for its behavior-
+neutral successor are in
+[`CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`](CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md).
 
 Important measurement rules:
 
@@ -105,14 +108,28 @@ executable is
 (SHA-256
 `78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`).
 
-The next gate is behavior-neutral measurement of generation-keyed exact-owner
-joinability and MFC issue-to-tag-consumption slack. Only if that oracle predicts
-material savings should a live-owner single-flight broker be implemented: one
-leader performs the required synchronization, same-generation followers join
-it, and real readbacks are scheduled early only where guest tag/barrier timing
-provides useful overlap. Receipt v1's failure does not invalidate the earlier
-architecture-scale coherence evidence, but it contributes zero realized
-saving toward 30 FPS.
+Commit `c25fb7dc2`, pushed on `opt/macos-tlou-feedback-snapshot-reuse`, removes
+receipt v1's inert copy/receipt behavior and implements only a debug-overlay-
+gated CELLJOIN/MFCSLACK oracle. CELLJOIN groups exact ordered Vulkan plans by
+renderer/directory/section/producer/content semantics, including safe cross-
+page grouping with per-member coverage proof,
+then records Q (flush-queue-reference release), D (data ready), U (unprotect
+complete), and conservative terminal outcomes. MFCSLACK follows matched direct
+SPU GETL members through tag update, publication, first RdTagStat demand, and
+return; immediate, ambiguous, ordered, stalled, unsupported, or incomplete
+paths are censored rather than credited. The same-owner SPU thread-group
+restart lifetime is generation-bound and covered by focused tests. The focused
+suite passes 52/52, the root suite passes 247/247 enabled with two disabled,
+the Release+ThinLTO full app link passes, and all audited blockers are resolved.
+This checkpoint is launch-ready for its bounded behavior-neutral capture.
+
+No optimization is implemented. One bounded overlay-on run is next, using the
+zero-drop/exhaustion and predeclared GO/STOP gates in the protocol document.
+Overlay timing, raw interval sums, and slack sums are attribution only: they are
+not wall time, FPS, or realized savings. A live-owner broker is authorized only
+if offline de-duplicated evidence clears the materiality gate. Receipt v1's
+failure does not invalidate the architecture-scale coherence evidence, but it
+contributes zero realized saving toward 30 FPS.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,

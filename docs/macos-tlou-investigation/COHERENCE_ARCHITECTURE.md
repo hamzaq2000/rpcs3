@@ -216,10 +216,10 @@ owner only if an already-published texture owner covers its complete range; an
 incomplete handoff is nonfatal, retains the conservative nontexture owner, and
 poisons the directory so future behavioral use falls back.
 
-The checkpoint also adds a stable directory session and codifies the global
-lock order: renderer-lifetime shared lock, texture-cache or ZCULL pages lock,
-then the directory session innermost. No source lock may be acquired while the
-stable session lives. Two integration tests use real `buffered_section`
+That historical checkpoint also added a stable directory session and used a
+renderer-lifetime shared lock followed by the texture-cache or ZCULL pages lock
+and the directory session innermost. No source lock could be acquired while the
+stable session lived. Two integration tests use real `buffered_section`
 instances: one covers confirmed-range protection, expansion, and unprotect;
 the other covers discard after the caller physically unlocks the range. All 13
 focused tests and all 211 enabled tests pass, with two existing tests disabled,
@@ -333,25 +333,94 @@ backing is proven. Preserve the general ownership/lifetime/hook infrastructure.
 The exact result and artifact identity are in
 `COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`.
 
+Commit `c25fb7dc2` removes that inert receipt copy path, receipt metadata/
+counters, and receipt-specific Vulkan lifetime behavior. The ownership
+directory and quiescent renderer-lifetime epoch remain, but the receipt-only
+renderer-lifetime shared-lock/session layer is deleted. The current lock order
+is texture-cache or ZCULL pages lock, then the directory stable-session lock
+innermost; no source lock is acquired while that session lives. No current path
+consumes a receipt, no successor copy optimization is present, and the
+historical `6fd9d4968` verification/artifact must not be attributed to
+`c25fb7dc2`.
+
 ## Phase 3: live-owner joinability oracle and MFC coherence broker
 
 The 7,467 exact-owner rejections establish candidate volume and ordering, but
-not joinability or recoverable time. Before another behavioral branch, add a
-bounded, behavior-neutral oracle that records:
+not joinability or recoverable time. Commit `c25fb7dc2` therefore implements a
+bounded, debug-overlay-gated CELLJOIN/MFCSLACK oracle. It observes
+the unchanged legacy path and does not alter bytes, protection, invalidation,
+readback scheduling, MFC completion, tags, or guest ordering.
 
-- the exact logical owner/lifetime epoch and content generation observed by
-  each candidate GET;
-- prospective leader and same-generation follower counts, range overlap,
-  arrival spread, and the legacy synchronization completion shared by them;
-- primary submissions, flush handoffs, and GPU waits that one single-flight
-  operation would have replaced; and
-- MFC issue to the first tag/barrier/fence completion demand for the affected
-  command, including cases whose ordering leaves no overlap window.
+CELLJOIN captures an allocation-free plan of at most 16 sections under the
+texture-cache lock. Its semantic identity contains the renderer epoch, stable
+even directory sequence, exact ordered section/session/producer identities,
+content/staged/transfer/synchronization/write generations, full/confirmed/
+locked ranges, state, geometry, format, swizzle, exclusion, and execution role.
+Members group only when the renderer/directory identity and whole ordered plan
+match. Cache-revision drift and each member's fault/invalidation ranges remain
+telemetry rather than group keys, which deliberately permits an identical plan
+to span different native pages. Completion still requires the sole successful
+materializer's range to cover every member fault; cross-page grouping never
+authorizes broadened invalidation.
 
-Only stable semantic owner/generation groups predicting material critical-path
-savings clear the implementation gate. Bedroom address, guest/host PC,
-observed transfer-size signature, cadence, rank, and title identity are not
-policy keys.
+Each member records submission plus three non-interchangeable milestones: Q is
+release of its actually posted flush-queue reference, D is return from the real
+flush/data work with exact completion proof, and U is completion of unprotect.
+Success requires exact execution/readback/generation proof and `semantic >= U
+>= D`; a follower no-op requires a prior materializer and an exact empty,
+cache-unchanged replan with no transfer, readback, readback-wait, flush,
+unprotect, or discard evidence. The ordinary queue handoff remains allowed. An
+exact-complete cohort has exactly one materializer, zero abandonments, all
+remaining members proven no-op, all terminals present, full member-range
+coverage, and complete queue-reference accounting. Other outcomes remain
+explicit mismatch/offloader/abandon terminals. Storage is fixed at 64 active
+cohorts, 64 members/cohort, and 1,024 cohort plus 1,024 member records.
+
+MFCSLACK attaches the same cohort/member key only to direct, successfully
+completed, unordered SPU GETL work. Fixed per-thread state holds 16 active-list
+candidates and 64 candidates awaiting consumption; the result ring holds 4,096
+records and the runtime deadline is two seconds. C++ and LLVM hooks follow the
+candidate through its enclosing-list completion, tag mask, `WrTagUpdate`,
+actual publication, first `RdTagStat` demand (including the conservatively early
+`RCHCNT` observation), and returned bits. `ALL` and single-bit `ANY` are valid
+only when the live transaction's mode/mask matches publication and returned
+bits equal published bits; query and publication generations are independent
+trace IDs, not values required to equal one another. Immediate, ambiguous,
+queued/resumed, stalled, barrier/fence, later-same-tag, early/overwritten,
+missing-publication, unsupported AsmJit, overflow, lifecycle, and deadline cases
+are censored rather than credited.
+The nominal two-second deadline is emitted on the next tracker hook rather than
+by a timer.
+Exact CELLJOIN terminal values and MFCSLACK censor values are recorded in
+[`CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`](CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md).
+
+The focused suite passes 52/52, the root suite passes 247/247 enabled with two
+disabled, and the Release+ThinLTO full app link passes. All findings from two
+independent source audits are resolved, including explicit lifecycle-generation
+binding and regression coverage for a same-owner SPU thread-group restart. The
+checkpoint is committed, pushed, and launch-ready. Its preserved executable is
+`/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-c25fb7dc-celljoin-mfcs.app`
+(SHA-256
+`aede4a855a00244c17ec68cbc17d610a5d46ee4d9659db726d041344c04b12f1`).
+
+Use exactly one bounded overlay-on run. Validity requires zero loss/exhaustion
+and only exact-complete cohorts plus `valid=1, censor=0` slack records.
+Synchronous GO requires >=70% of exact-owner attempts in cohorts
+of multiplicity >=2, >=4 validated followers/frame, >=80% of followers no-
+readback under the same closure, and >=2.5 ms/frame in the offline critical
+Q/tail union; STOP below 1.5 ms/frame or below two followers/frame. Async GO
+requires >=85% definitive dependency coverage and >=10 ms/frame safe hide. A
+credible 30-FPS line further requires about 14 ms/frame hide, `Tpred <= 35 ms`,
+and an optimistic demand envelope <=33.3 ms; STOP below 70% coverage, below
+7 ms/frame safe hide, or when even optimistic `Tpred > 35 ms`.
+
+Raw CELLJOIN interval sums and MFCSLACK slack sums can overlap and duplicate
+shared time. They are attribution, not wall time, FPS, or realized saving;
+offline union/de-duplication is still a counterfactual bound. Only stable
+semantic groups clearing the predeclared gates authorize a behavioral branch.
+Hard-coded bedroom address, guest/host PC, observed transfer-size signature,
+previously observed section identity/rank, cadence, and title identity are not
+policy keys. Current live identity/rank remains part of exact plan equality.
 
 If the gate passes, implement synchronous generation-keyed single-flight
 first. One leader owns the legacy synchronization for an exact current owner;
@@ -379,10 +448,11 @@ explicit asynchronous coherence requests:
 - keep atomic MFC transactions synchronous initially.
 
 Oracle v2 finds repeated same-generation GET handoffs, but neither it nor the
-zero-hit receipt run proves issue-to-consumption slack. If the remaining data
-are true, immediately consumed dependencies with no prediction or overlap
-window, this is a real synchronization bound rather than an implementation
-accident. Stop rather than moving the same wait to tag consumption.
+zero-hit receipt run proves issue-to-consumption slack. CELLJOIN/MFCSLACK is the
+current measurement gate; no broker exists yet. If the bounded run finds true,
+immediately consumed dependencies with no safe overlap window, this is a real
+synchronization bound rather than an implementation accident. Stop rather than
+moving the same wait to tag consumption.
 
 ## Deterministic PPU fault
 
@@ -422,7 +492,7 @@ addresses or cadence, discard it rather than hard-code it.
 - lock-order deadlocks among VM reservations, I/O mapping, texture cache,
   flush queue, and offloader paths;
 - local-store races or broken MFC tag/barrier semantics in the asynchronous
-  broker;
+  broker or its behavior-neutral oracle;
 - pause, savestate, cancellation, or shutdown with pending requests;
 - accidentally bypassing ZCULL or VM allocation protection.
 
@@ -439,8 +509,9 @@ all of that wait leaves about 40.1 ms/frame and another 6.8 ms/frame to recover.
 The 6.65-per-frame no-readback GET herd is therefore important alongside the
 true readbacks, but neither proves the remaining saving. Receipt v1 realizes
 none of this bound: it had zero hits because it waited until after exact-owner
-retirement. A live-owner joinability/slack oracle must now quantify how much of
-the herd and readback latency is actually coalescible or overlap-capable.
+retirement. The current behavior-neutral CELLJOIN/MFCSLACK oracle must now
+quantify how much of the herd and readback latency is actually coalescible or
+overlap-capable under its exact completion and censor gates.
 Reaching 30 likely also requires work on the framebuffer-feedback path, guest
 execution, or both.
 In the later, nonstationary 14-FPS sample, main-PPU guest execution alone

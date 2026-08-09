@@ -356,10 +356,11 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     owner only after a texture owner covering the complete prelock range has
     been published; failure is nonfatal, retains the nontexture owner, poisons
     the directory, and therefore forces any future behavioral user to the old
-    path. A stable session pins directory ownership and epoch under the fixed
-    lock order: renderer-lifetime shared lock, texture-cache or ZCULL pages
-    lock, then directory lock innermost; no source lock may be acquired while
-    that session lives. Two integration tests exercise real `buffered_section`
+    path. At that historical checkpoint, a stable session pinned directory
+    ownership and epoch under a renderer-lifetime shared lock followed by the
+    texture-cache or ZCULL pages lock and the directory lock innermost; no
+    source lock was acquired while that session lived. Two integration tests
+    exercise real `buffered_section`
     confirmed-range expansion/unprotect and physical-unlock/discard lifecycles.
     All 13 focused tests and all 211 enabled tests pass, with two existing tests
     disabled, and Release+ThinLTO `rpcs3_emu` builds. Nothing in the checkpoint
@@ -429,33 +430,94 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     cannot explain zero cumulative hits, so another receipt-only bedroom run is
     not justified. The exact boundary and artifact identity are in
     `COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`.
+41. Commit **`c25fb7dc2`**, pushed on
+    `opt/macos-tlou-feedback-snapshot-reuse`, removes receipt v1's
+    inert SPU copy path, receipt metadata/counters, and receipt-specific Vulkan
+    lifetime behavior. In their place it adds only a debug-overlay-gated,
+    behavior-neutral CELLJOIN + MFCSLACK oracle. It neither copies new bytes nor
+    changes protection, invalidation, readback scheduling, MFC completion, tag
+    values, or guest-visible ordering.
+
+    CELLJOIN captures the exact ordered Vulkan plan for a deferred read fault:
+    renderer epoch, stable directory sequence, section/session/producer and all
+    relevant content/transfer/staged/synchronization/write generations, ranges,
+    state, geometry, format, and execution role/rank. Same semantic plans may
+    group faults from different native pages and cache revisions, but every
+    member retains its own fault/invalidation range and completion is accepted
+    only when the sole proven materializer covers them all. Q is queue-reference
+    release, D is completion of the actual flush/data work, and U is completion
+    of unprotect; success requires exact execution and generation proof with
+    `semantic >= U >= D`, while a follower no-op requires an empty unchanged
+    replan after the materializer. All other outcomes are explicit terminals.
+
+    MFCSLACK attaches the same cohort/member key to a direct unordered SPU GETL
+    and follows its enclosing-list completion through WrTagUpdate, actual tag
+    publication, first RdTagStat demand, and return. Only `ALL` or single-bit
+    `ANY` observations with a consistent mode/mask/publication/return and no
+    ordering edge are valid. Immediate, multi-bit ANY, early/overwritten query,
+    barrier/fence, later same-tag work, stall/resume, unsupported AsmJit tag
+    path, lifecycle, overflow, missing-publication, and deadline cases are
+    censored, never converted to slack. Fixed capacities are 16 plan sections,
+    64 cohort slots, 64 members/cohort, 1,024 cohort and member records, 16
+    active list candidates, 64 pending candidates, and a 4,096-result MFCSLACK
+    ring.
+
+    The current lock order is texture-cache or ZCULL pages lock, then the
+    ownership-directory stable-session lock innermost. The receipt-only
+    renderer-lifetime shared-lock/session layer is deleted; the quiescent
+    renderer epoch remains as identity. The focused suite passes 52/52, the
+    root suite passes 247/247 enabled with two disabled, and the Release+ThinLTO
+    full app link passes. All findings from two independent source audits are
+    resolved, including explicit generation binding and a regression test for
+    same-owner SPU thread-group restart. This checkpoint is launch-ready for
+    the bounded diagnostic run. Exact terminal/censor mappings, completion
+    gates, artifact identity, and the predeclared live protocol are in
+    `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`.
 
 ## Current blocker
 
-Receipt v1's runtime gate is complete and negative. Do not tune its fallback
-checks, run an overlay-off A/B, or repeat the same bedroom validation. The next
-blocker is a behavior-neutral oracle for the live-owner design. It must measure:
+Receipt v1 is removed from the current source and must not be repeated. The
+current blocker is one behavior-neutral CELLJOIN/MFCSLACK oracle run from the
+preserved `c25fb7dc2` app with the overlay on. Target
+30--60 seconds and at least 600 complete package-`0x202` periods, then allow two
+seconds for pending tag candidates to drain.
 
-- generation-keyed exact-owner joinability: prospective leader/follower count,
-  arrival spread, shared legacy synchronization, and the submissions/handoffs
-  a single-flight operation could actually remove; and
-- MFC issue-to-tag-consumption slack, with barriers and fences represented, to
-  show whether true readback latency can overlap useful Cell work rather than
-  merely move into a later tag wait.
+The interval is usable only with zero plan/slot/member exhaustion, cohort/member
+record loss, MFCSLACK ring loss and active/pending overflow, and with no stale
+terminal, incomplete queue proof, unexplained interior live candidate,
+ownership poison/mismatch, kick timeout, device loss, or fatal error. Claimed
+join time comes only from complete homogeneous-SPU-GET cohorts with exactly one
+proven materializer, coverage of every member fault, and all other members
+proven no-op. Claimed slack comes only from matched `valid=1, censor=0` records.
 
-Do not implement a behavioral broker from the 7,467 rejection count alone.
-Proceed only if the oracle predicts material critical-path savings through
-stable semantic owner/generation keys and enough ordering slack. A first
-synchronous single-flight prototype must collapse redundant handoffs; an
-asynchronous extension must also reduce primary submissions/events rather than
-relocating the same wait.
+Synchronous GO requires all four predeclared gates: at least 70% of exact-owner
+attempts in multiplicity-at-least-two cohorts, at least four validated followers
+per frame, at least 80% of followers resolving no-readback under the same proven
+closure, and at least 2.5 ms/frame in the offline union of critical Q/tail
+intervals. STOP that route below 1.5 ms/frame or below two validated followers
+per frame. A value in between is not implementation authorization.
 
-The implementation contains no bedroom-specific address, PC, transfer-size
-signature, section identity, cadence, measured rank, or title ID. Its keys are
-only general emulator semantics: MFC direction/range, VM readability and lifetime,
-texture/nontexture ownership, renderer epoch, actual copied range, and current
-RTT content generation. The bedroom remains a controlled microscope; a
-bedroom-only win is insufficient for a game-general claim.
+Asynchronous GO requires at least 85% definitive dependency coverage and at
+least 10 ms/frame of conservatively de-duplicated safe hide. A credible 30-FPS
+line further requires about 14 ms/frame hide, predicted frame time `Tpred <=
+35 ms`, and an optimistic demand envelope at or below 33.3 ms. STOP that route
+if coverage is below 70%, safe hide is below 7 ms/frame, or even optimistic
+`Tpred` exceeds 35 ms. Repair the oracle, without inferring zero opportunity,
+if a validity gate fails.
+
+Overlay-on timing is attribution only. `CELLJOIN *_interval_sum_us` and
+`MFCSLACK *_slack_sum_us` are overlapping arithmetic sums, not wall time, FPS,
+or additive critical-path savings. Even an offline union is a counterfactual
+bound until a later behavior-changing overlay-off A/B. No broker or other
+optimization is implemented in this checkpoint.
+
+The oracle has no hard-coded title/bedroom address, PC, observed size, identity,
+cadence, or rank key. Current live section/producer identity and execution rank
+participate only in exact plan equality; no fixed bedroom value selects a
+group. Policy inputs are general emulator semantics: ordered plan, owner/session/
+producer generations, range coverage, renderer/directory lifetime, MFC GET/tag,
+and guest ordering. A bedroom-only positive result still requires distinct-
+scene validation after a behavior-changing prototype exists.
 
 Direct PPU JIT accesses still rely on host protection and remain a later
 producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
@@ -525,8 +587,22 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
 - Negative `6fd9d4968` receipt-v1 capture in
   `COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`: zero hits against 7,467
   current-exact-owner and 1,599 directory rejections. The post-flush receipt is
-  too late for the concurrent reader herd. Preserve the general infrastructure,
-  but do not broaden or performance-test this inert branch.
+  too late for the concurrent reader herd. Do not broaden or performance-test
+  this inert branch; its behavioral path is removed in the current working tree.
+- Launch-ready behavior-neutral CELLJOIN + MFCSLACK checkpoint `c25fb7dc2`:
+  fixed exact-plan cohorts join same renderer/directory/section/producer/
+  generation semantics
+  across same or different native fault pages, then conservatively prove Q/D/U,
+  one materializer, no-op followers, range coverage, and queue release. Matched
+  direct SPU GETL candidates follow tag update/publication/RdTagStat boundaries;
+  every ambiguous or ordered path is explicitly censored. The receipt copy path
+  is gone and no broker is implemented. The focused tests pass 52/52, the root
+  suite passes 247/247 enabled with two disabled, and the Release+ThinLTO full
+  app link passes. All audited blockers, including same-owner thread-group
+  restart lifetime binding, are resolved. The preserved app is
+  `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-c25fb7dc-celljoin-mfcs.app`;
+  exact artifact identity, protocol, and numeric enum maps are in
+  `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`.
 
 At `6fd9d4968`, the affected Release+ThinLTO build and full app link pass, all
 20 focused Cell-access tests pass, and the pin/lifecycle subset passes 100
