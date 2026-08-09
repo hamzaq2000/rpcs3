@@ -53,45 +53,46 @@ effective log configuration rather than only the intended YAML values.
 | Valid oracle-v2 capture (`e0be35322`) | Full window: 1,276 periods/70.262005 s = 18.1606 FPS. Exact interior: 1,254 frames/69.051046 s; zero loss/overflow/mismatch/pairing/offloader gates and 14,615/14,615 containing SPU MFC contexts. Per frame: 1 PPU + 11.655 SPU faults, 4 fault-attached of 6 global readbacks, 14.990 ms aggregate flush wait, and 14.943 ms global readback wait. One 230,400-byte readback is native-page collateral; two semantic GET classes cause 6.65 no-readback faults/frame and 73.65% of flush wait | Oracle v2 is valid and the implementation gate is met. Build a generation-keyed exact GET ticket/shadow directory; do not continue bedroom-only profiling. True readbacks expose about 15 ms/frame, but 30 FPS would still need another 6--7 ms/frame. Production rules must be semantic and cross-scene validated |
 | Behavior-preserving Cell-access ownership summary (`44f581fb1`) | Fixed 16 KiB conservative counts track texture-cache `NO` owners through common buffered-section protect/expand/discard transitions. Stable read-fault probes, a cache-try-lock exact debug-only recount at five-second cadence, cache-busy count, and recount total/maximum duration are emitted in `CELLDIR`. Focused tests pass 8/8 and the full suite passes 206/206 enabled with two disabled | Proof checkpoint only: no emulation behavior changes. `clear` is only a negative texture-owner hint, not VM/ZCULL permission or a lifetime pin. Its subsequent bounded validation is recorded in the next row |
 | Valid ownership-summary capture (`cbe0b7960`) | Marker window: 825 periods/45.116754 s = 18.2859 FPS. Clean first-to-last `CELLDIR` interior: 815 frames/44.560866 s; 8,412 accepted reads, all `maybe_texture`; nine recounts; zero interval clear/inconclusive, mismatch, missing/excess reference, poison, mutation/sequence error, or cache-busy scan. Final recount: 31 sections, 5,548/5,548 references and 4,983/4,983 granules. Four of >25,000 complete-run probes conservatively fell back as inconclusive outside the interval; zero stable clear, mismatch, or poison | The behavior-neutral summary passes its live gate; no repeat bedroom run is needed. Add a quiescent lifecycle reset and real buffered-section transition tests, then use it only as the negative hint for a game-general synchronous exact GET ticket. Preserve inconclusive fallback and require cross-scene validation |
+| Safe Cell-access lifetime preparation (`6fda0daf0`) | Added a quiescent renderer reset and lifetime epoch; a separate nontexture `NO` plane for ZCULL pages and transient texture-cache prelocks; nonfatal handoff that retires the prelock only when an already-published texture owner covers its complete range; and a stable session with renderer lifetime → texture cache or ZCULL → directory as the fixed lock order. Two real `buffered_section` tests cover confirmed-range expansion/unprotect and physical-unlock/discard. Focused tests pass 13/13, the full suite passes 211/211 enabled with two disabled, and Release+ThinLTO `rpcs3_emu` builds | Behavior remains unchanged. The reset prevents stale ownership crossing renderer lifetimes; failed handoff retains conservative nontexture ownership and poisons future probes into fallback. The prerequisite is complete, so the blocker advances to the Vulkan ready-snapshot synchronous GET ticket |
 
 ## Next experiments
 
-1. Add a quiescent directory reset/rebuild at a proven renderer lifecycle
-   boundary and focused integration tests for real buffered-section protection,
-   confirmed-range protection, expansion, and discard. Stale counts must not
-   cross renderer lifetimes.
-2. Implement the smallest generation-keyed synchronous exact-GET ticket/shadow
-   path. Publish exact RSX-owned intervals and content/synchronization
-   generations behind a lifetime epoch; use the native 16 KiB summary only as a
-   cheap negative texture-owner hint. Resolve and pin exact intersecting owners,
-   reuse a correctly generated CPU-visible shadow, preserve same-native-page
-   siblings, and retain the existing fallback on every ambiguity—including the
-   observed inconclusive probe case.
-3. Before a behavioral game launch, cover concurrency, lifetime races,
-   sibling protection, normal and list GET, tag/barrier ordering, invalidation,
-   and generation wrap. VM/ZCULL, atomic, Raw-SPU, unsupported, and ambiguous
-   cases must retain the old path. The common negative path must remain
-   allocation-free and a few local loads: millions of ordinary MFC submissions
-   per second cannot call unconditionally into RSX.
-4. Use the bedroom only to functionally validate the prototype and measure one
+1. Implement the smallest Vulkan ready-snapshot synchronous exact-GET ticket.
+   Pin the VM range/lifetime and the texture-cache exact owners for the entire
+   copy. With renderer lifetime and cache ownership held, acquire the directory
+   stable session innermost and require a matching epoch and
+   `maybe_nontexture == false`. Accept only a CPU-visible snapshot already ready
+   for each exact owner's current content generation. Preserve same-native-page
+   siblings, never mutate the legacy section `flushed` state, and fall back on
+   every failed or ambiguous proof—including the observed inconclusive probe
+   case.
+2. Before a behavioral game launch, cover concurrency, VM and cache lifetime
+   races, exact-owner replacement, sibling protection, ready/stale generations,
+   normal and list GET, tag/barrier ordering, invalidation, and generation wrap.
+   VM/ZCULL, atomic, Raw-SPU, unsupported, nontexture-owned, and ambiguous cases
+   must retain the old path. The common negative path must remain allocation-free
+   and a few local loads: millions of ordinary MFC submissions per second cannot
+   call unconditionally into RSX.
+3. Use the bedroom only to functionally validate the prototype and measure one
    overlay-off A/B. Require fewer handled GET faults and flush handoffs without
    moving the time into MFC/channel waits or introducing visual corruption.
    Then repeat the semantic mechanism in distinct gameplay scenes before making
    a general performance claim. Never key production behavior on an address,
-   PC, section identity, cadence, or bedroom signature.
-5. If the exact synchronous ticket removes handoffs but true readbacks remain
+   PC, transfer size, section identity, cadence, signature, or any other bedroom
+   observation.
+4. If the exact synchronous ticket removes handoffs but true readbacks remain
    serialized, extend only the proven slow path into a generation-coalescing
    asynchronous MFC broker while preserving tag, barrier, local-store, atomic,
    pause, and shutdown semantics.
-6. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+5. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-7. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+6. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-8. Only after the supported renderer path is measured, isolate-test the removed
+7. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-9. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+8. Keep renderer and title-patch work separate from boot commit `983c69d5e`.

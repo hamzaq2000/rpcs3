@@ -161,7 +161,7 @@ no additional bedroom-only attribution pass is required before phase 2.
 
 ## Phase 2: generation-keyed logical directory, shadow, and exact GET ticket
 
-### Behavior-preserving ownership-summary checkpoint
+### Behavior-preserving ownership and lifetime checkpoints
 
 Commit `44f581fb1`, the first phase-2 checkpoint, deliberately stops before
 changing an access decision. It maintains a fixed 16 KiB conservative count of
@@ -206,12 +206,25 @@ false negative. The exact boundary and artifact identity are in
 `OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`; another bedroom-only summary run is
 not required.
 
-Eight focused directory tests and all 206 enabled tests pass; two existing
-tests remain disabled. The summary nevertheless remains behavior-neutral.
-Before it controls behavior, the current blocker is a quiescent reset/rebuild
-at a proven renderer lifecycle boundary plus integration tests that exercise
-real protect, confirmed-range protect, range expansion, and discard
-transitions.
+Commit `6fda0daf0` completes the behavior-neutral lifetime prerequisite. At the
+quiescent boundary after construction of the fully derived renderer, but before
+backend initialization creates protected sections or Cell execution resumes,
+it clears both ownership planes, resets validation state, and advances a
+renderer-lifetime epoch. A second, nontexture `NO` plane now covers ZCULL pages
+and the texture cache's transient physical prelocks. Handoff retires a transient
+owner only if an already-published texture owner covers its complete range; an
+incomplete handoff is nonfatal, retains the conservative nontexture owner, and
+poisons the directory so future behavioral use falls back.
+
+The checkpoint also adds a stable directory session and codifies the global
+lock order: renderer-lifetime shared lock, texture-cache or ZCULL pages lock,
+then the directory session innermost. No source lock may be acquired while the
+stable session lives. Two integration tests use real `buffered_section`
+instances: one covers confirmed-range protection, expansion, and unprotect;
+the other covers discard after the caller physically unlocks the range. All 13
+focused tests and all 211 enabled tests pass, with two existing tests disabled,
+and Release+ThinLTO `rpcs3_emu` builds. The earlier `44f581fb1` result was 8/8
+focused and 206/206 enabled. Neither checkpoint changes an access decision.
 
 Separate logical ownership and synchronized content state from trap
 granularity:
@@ -222,22 +235,39 @@ granularity:
 - Maintain a native-16-KiB summary only as the hot negative lookup hint. One
   normal MFC command is at most 16 KiB, so the common path should inspect at
   most two summaries and perform no map scan, allocation, or renderer call.
-- Protect directory lifetime with an epoch/refcount scheme and update it on
-  section protection, resize, discard, flush, unmap, reuse, and ZCULL changes.
-  A stale false negative would silently corrupt guest memory.
+- Use the quiescent renderer epoch as one part of lifetime identity, but also
+  pin the exact VM range/mapping and each exact cache owner for the duration of
+  a behavioral copy. The summary and epoch alone cannot prevent VM unmap or
+  section reuse. A stale false negative would silently corrupt guest memory.
 - Publish a CPU-visible shadow only after exact intersecting sections are
   synchronized. Its generation is reusable by later readers until the RSX
   content generation changes; publication and invalidation must be ordered with
   the same ownership transition.
 
-An RAII `cell_get_ticket{EA, size, tag/barrier state}` then either:
+The first behavioral step is a Vulkan ready-snapshot RAII
+`cell_get_ticket{EA, size, tag/barrier state}`. Its acquisition order is:
+
+1. pin and validate the exact VM range/mapping lifetime;
+2. hold the renderer-lifetime shared lock, acquire the texture-cache lifetime,
+   and resolve and pin every exact intersecting owner;
+3. acquire the directory stable session innermost, verify the same renderer
+   epoch, and require `maybe_nontexture == false`; and
+4. require every selected CPU-visible Vulkan snapshot to be ready for its
+   owner's current content generation.
+
+The ticket then either:
 
 1. returns the normal base pointer when no protected native page is involved;
-2. resolves and pins exact logical owners, uses an already-synchronized shadow
-   for the required generation, and returns exact bytes through the safe alias;
-3. synchronizes only exact stale-generation owners, publishes that shadow once,
-   and then returns the exact bytes; or
-4. falls back unchanged when the epoch changes or semantics are unsupported.
+2. copies exact bytes from already-ready, current-generation snapshots through
+   the safe alias while every range/owner/lifetime pin remains held; or
+3. falls back unchanged when any range, owner, nontexture, readiness,
+   generation, epoch, or semantic check fails.
+
+This ticket is a consumer of already-ready snapshots, not a second invalidator.
+It must not set, clear, or otherwise repurpose the legacy buffered-section
+`flushed` flag; that state remains owned by the existing flush/invalidation
+machinery. A later ticket may initiate or coalesce a stale-generation sync only
+after this conservative ready-only branch is correct and measured.
 
 Same-native-page sibling sections are keepers: they remain logically owned and
 physically protected while exact requested bytes are accessed through the sudo
@@ -251,13 +281,15 @@ Raw-SPU MMIO, ZCULL, ambiguous ownership, and unsupported mappings retain the
 existing behavior until separately proven. MFC tag and barrier completion must
 remain observationally identical.
 
-After the reset and transition-test prerequisite, focused ticket tests must
-cover lifetime races, sibling protection, invalidation, generation wrap,
-normal and list GETs, and MFC ordering before a behavioral game launch. The
-synchronous ticket is an enabling prototype. Continue only if it materially
-reduces handled GET faults and flush handoffs without moving the same cost into
-channel/MFC waits. Bedroom validation is followed by distinct gameplay scenes;
-a bedroom-only win is rejected.
+Focused ticket tests must cover VM and cache lifetime races, exact-owner
+replacement, nontexture ownership, sibling protection, ready/stale generation,
+invalidation, generation wrap, normal and list GETs, and MFC ordering before a
+behavioral game launch. The synchronous ticket is an enabling prototype.
+Continue only if it materially reduces handled GET faults and flush handoffs
+without moving the same cost into channel/MFC waits. Bedroom validation is
+followed by distinct gameplay scenes; no production branch may depend on a
+bedroom address, PC, transfer size, section identity, cadence, signature, or
+measured rank, and a bedroom-only win is rejected.
 
 ## Phase 3: asynchronous MFC coherence broker
 

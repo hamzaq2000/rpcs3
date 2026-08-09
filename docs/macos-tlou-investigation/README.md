@@ -73,13 +73,29 @@ a stable clear. Another bedroom ownership-summary run is not needed.
 
 The stable probe remains only a conservative negative hint about texture-cache
 ownership; it does not prove VM or ZCULL safety and does not pin a section or
-protection lifetime. No result in this checkpoint changes emulation behavior.
-The immediate blocker is a quiescent lifecycle reset plus real buffered-section
-transition tests; after those pass, implement the game-general,
-generation-keyed synchronous exact GET ticket/shadow mechanism.
+protection lifetime. Commit `6fda0daf0` closes the behavior-neutral lifetime
+prerequisites: a proven quiescent renderer boundary clears both ownership
+planes and advances an epoch; a separate nontexture `NO` plane covers ZCULL
+pages and transient texture-cache prelocks; and a nonfatal handoff removes a
+prelock only after exact texture-owner coverage is published. Failure retains
+the conservative owner and forces future behavioral users to fall back. A
+stable directory session also codifies the global lock order as renderer
+lifetime, texture cache or ZCULL, then the directory innermost. Two tests drive
+real `buffered_section` protect/confirmed-range expansion/unprotect and
+physical-unlock/discard lifecycles. All 13 focused and 211 enabled full-suite
+tests pass (two remain disabled), and Release+ThinLTO `rpcs3_emu` builds.
+
+No result through `6fda0daf0` changes an access decision. The immediate blocker
+is the smallest Vulkan ready-snapshot synchronous GET ticket. It may bypass the
+legacy fault path only while the VM range and lifetime are pinned, the texture
+cache validates and pins every exact owner, an innermost stable session reports
+no nontexture owner, and each selected CPU-visible snapshot is ready for the
+current content generation. It must not mutate the legacy section `flushed`
+state; any failed proof falls back unchanged.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,
 generation, and ordering—never hard-coded guest addresses, PCs, or observed
-bedroom signatures. A promising rule must pass cross-scene correctness and
-performance validation before it can support a general performance claim.
+bedroom signatures or measurements. A promising rule must pass cross-scene
+correctness and performance validation before it can support a general
+performance claim.

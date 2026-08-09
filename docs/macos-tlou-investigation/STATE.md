@@ -346,27 +346,53 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     zero stable-clear result, mismatch, or poison. This does not invalidate the
     accepted window or require another bedroom-only summary run. Full artifact
     identity and boundaries are in `OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`.
+38. Commit `6fda0daf0` completes the behavior-neutral lifetime prerequisites.
+    At the proven boundary after the fully derived renderer exists but before
+    backend initialization creates protected sections or Cell execution
+    resumes, it clears the texture and nontexture ownership planes, resets
+    validation state, and advances a renderer-lifetime epoch. The new
+    nontexture `NO` plane accounts for ZCULL page protection and transient
+    texture-cache prelocks. Its exact-coverage handoff removes a transient
+    owner only after a texture owner covering the complete prelock range has
+    been published; failure is nonfatal, retains the nontexture owner, poisons
+    the directory, and therefore forces any future behavioral user to the old
+    path. A stable session pins directory ownership and epoch under the fixed
+    lock order: renderer-lifetime shared lock, texture-cache or ZCULL pages
+    lock, then directory lock innermost; no source lock may be acquired while
+    that session lives. Two integration tests exercise real `buffered_section`
+    confirmed-range expansion/unprotect and physical-unlock/discard lifecycles.
+    All 13 focused tests and all 211 enabled tests pass, with two existing tests
+    disabled, and Release+ThinLTO `rpcs3_emu` builds. Nothing in the checkpoint
+    changes an access decision.
 
 ## Current blocker
 
-The behavior-neutral ownership summary has passed its bounded live proof; no
-repeat bedroom-only summary run is needed. Before it controls an access
-decision, add a quiescent reset that rebuilds or clears state at a proven
-renderer lifecycle boundary and add integration tests that exercise real
-buffered-section protection, confirmed-range protection, range expansion, and
-discard transitions.
+The behavior-neutral ownership and lifetime prerequisites are complete; no
+repeat bedroom-only summary run is needed. The current blocker is the smallest
+game-general Vulkan ready-snapshot synchronous GET ticket. Its eligibility
+proof must remain valid for the entire exact copy:
 
-After those prerequisites pass, implement the smallest game-general,
-generation-keyed synchronous exact-GET ticket/shadow path. It must resolve and
-pin exact owners under the correct cache lifetime, preserve same-native-page
-sibling protection, retain the existing path for VM/ZCULL/atomic/Raw-SPU,
-unsupported, and ambiguous cases, and keep the ordinary MFC negative path to a
-few allocation-free local loads. The four complete-run inconclusive probes
-demonstrate the conservative fallback and must remain fallbacks, not be promoted
-to clear. Use the bedroom for functional validation and a later overlay-off
-A/B, then validate the semantic mechanism in distinct TLoU scenes. No
-production decision may key on an observed address, PC, transfer size, section
-identity, cadence, or bedroom signature.
+- pin the VM mapping/range and its lifetime;
+- hold the renderer-lifetime shared lock and the texture-cache lifetime needed
+  to validate and pin every exact intersecting owner;
+- acquire the ownership-directory stable session innermost, after those source
+  locks, and require `maybe_nontexture == false` as well as the matching epoch;
+- accept only a CPU-visible Vulkan snapshot that is already ready and belongs
+  to the owner's current content generation; and
+- copy exact bytes through the safe alias without changing the legacy
+  buffered-section `flushed` flag or its invalidation semantics.
+
+If any range, lifetime, exact-owner, nontexture, readiness, generation, or
+ordering proof fails, the request must retain the existing fault path. The
+ticket must preserve same-native-page sibling protection and keep
+VM/ZCULL/atomic/Raw-SPU, unsupported, and ambiguous cases on that path. The
+ordinary MFC negative path remains a few allocation-free local loads. The four
+complete-run inconclusive probes remain fallbacks, never clear results.
+
+Use the bedroom for functional validation and a later overlay-off A/B, then
+validate the semantic mechanism in distinct TLoU scenes. Production code may
+not depend on any observed bedroom address, PC, transfer size, section identity,
+cadence, signature, or measured rank.
 
 Direct PPU JIT accesses still rely on host protection and remain a later
 producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
@@ -418,10 +444,18 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   interval mismatch, poison, mutation error, clear, or inconclusive result.
   Four of more than 25,000 whole-run probes conservatively fell back as
   inconclusive outside the interval; no repeat run is required.
+- Behavior-neutral Cell-access lifetime preparation in `6fda0daf0`: a
+  quiescent renderer reset/epoch, nontexture ownership for ZCULL and transient
+  texture prelocks, conservative exact-coverage handoff, and an innermost
+  stable directory session with explicit lock order. Two real
+  `buffered_section` lifecycle tests cover confirmed-range expansion/unprotect
+  and physical-unlock/discard. This prepares but does not implement the Vulkan
+  ready-snapshot synchronous GET ticket.
 
-The ownership summary's eight focused tests and all 206 enabled tests pass;
-two existing tests remain disabled. The 198-test result above belongs to the
-oracle-v2 checkpoint; the 195-test result belongs to historical v1.
+At `6fda0daf0`, all 13 focused Cell-access tests and all 211 enabled tests pass;
+two existing tests remain disabled, and Release+ThinLTO `rpcs3_emu` builds. The
+eight/206 result belongs to the earlier ownership-summary checkpoint, the 198
+result to oracle v2, and the 195 result to historical v1.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
