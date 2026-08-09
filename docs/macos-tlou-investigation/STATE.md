@@ -469,61 +469,74 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     root suite passes 247/247 enabled with two disabled, and the Release+ThinLTO
     full app link passes. All findings from two independent source audits are
     resolved, including explicit generation binding and a regression test for
-    same-owner SPU thread-group restart. This checkpoint is launch-ready for
-    the bounded diagnostic run. Exact terminal/censor mappings, completion
+    same-owner SPU thread-group restart. This checkpoint supplied the completed
+    bounded diagnostic run in item 42. Exact terminal/censor mappings, completion
     gates, artifact identity, and the predeclared live protocol are in
     `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`.
+42. The one bounded `c25fb7dc2` runtime gate is valid and stops both measured
+    coherence-broker directions. Its raw byte interval contains 799 package-
+    `0x202` periods in 47.290224 seconds (16.89567 FPS with the debug overlay
+    enabled); the strict first-to-last cumulative summary interior contains 781
+    frames. Every loss, exhaustion, live-state, queue-accounting, ownership,
+    kick, device, audio, compile, and fatal validity gate passes. One optional
+    `sarah-tired-idle.stm` lookup returns `CELL_ENOENT` and is immaterial.
 
-## Current blocker
+    The interior adds 6,408 handled read probes, 5,055 exact-plan members, and
+    1,562 leaders. Its 781 accepted homogeneous SPU GET cohorts contain 4,274
+    members and 3,493 proven no-readback followers, or 4.472 followers/frame.
+    The herd is 84.55% of the accepted exact-plan subset but only 66.70% of all
+    handled reads, below the 70% synchronous GO share. Offline de-duplication
+    reduces the critical Q/tail union to 0.652 ms/frame, below the 1.5 ms/frame
+    synchronous STOP line.
+
+    MFCSLACK exactly joins and terminalizes all 4,274 candidates without loss,
+    overflow, or unexplained live state. Every enclosing command is `0x45`
+    (`MFC_GETLB_CMD`) and every result is censor 5,
+    `outer_barrier_or_fence`; valid credited candidates and safe hide are zero.
+    GETLB orders MFC commands but does not itself block ordinary SPU
+    computation, so barrier-aware async viability is unknown rather than
+    disproved. It is still secondary-scale: even unrealistically deleting each
+    candidate's complete candidate-to-outer-completion span yields a
+    de-duplicated union of only 1.620671 seconds, 2.028 ms per 799 package
+    periods or 2.075 ms per strict-interior frame. Correlated full-fault and
+    flush-wait unions are about 2.025 and 1.879 ms/frame. Do not repair the
+    tracker solely for this herd, implement either measured broker, or repeat
+    the bedroom run. The bound covers the admitted cohort subset, not every
+    conservative unknown-generation rejection or game readback. The exact
+    boundary and decision are in
+    `CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md`.
+
+## Current decision and next blocker
 
 Receipt v1 is removed from the current source and must not be repeated. The
-current blocker is one behavior-neutral CELLJOIN/MFCSLACK oracle run from the
-preserved `c25fb7dc2` app with the overlay on. Target
-30--60 seconds and at least 600 complete package-`0x202` periods, then allow two
-seconds for pending tag candidates to drain.
+CELLJOIN/MFCSLACK gate is also complete. Synchronous single-flight is
+decisively below its materiality floor. MFCSLACK v1 credits no asynchronous
+work, and even the impossible union of the complete candidate spans is only
+2.075 ms/strict-interior frame, far below the 7 ms STOP line and roughly 14 ms
+needed for a credible 30-FPS route. No broker is implemented or authorized.
 
-The interval is usable only with zero plan/slot/member exhaustion, cohort/member
-record loss, MFCSLACK ring loss and active/pending overflow, and with no stale
-terminal, incomplete queue proof, unexplained interior live candidate,
-ownership poison/mismatch, kick timeout, device loss, or fatal error. Claimed
-join time comes only from complete homogeneous-SPU-GET cohorts with exactly one
-proven materializer, coverage of every member fault, and all other members
-proven no-op. Claimed slack comes only from matched `valid=1, censor=0` records.
+Barrier-aware GETLB overlap remains formally unknown because an MFC barrier
+does not block ordinary SPU computation. Reopening that question would require
+a new tracker that proves queue, tag, fence, and local-store-use boundaries; do
+not build it solely for this secondary-scale herd. The completed run is valid,
+so censored results must not be reinterpreted and another bedroom capture is not
+needed.
 
-Synchronous GO requires all four predeclared gates: at least 70% of exact-owner
-attempts in multiplicity-at-least-two cohorts, at least four validated followers
-per frame, at least 80% of followers resolving no-readback under the same proven
-closure, and at least 2.5 ms/frame in the offline union of critical Q/tail
-intervals. STOP that route below 1.5 ms/frame or below two validated followers
-per frame. A value in between is not implementation authorization.
+The next blocker is a materially larger, game-general non-coherence mechanism.
+First audit a snapshot-free Vulkan design for the dominant full-screen
+framebuffer-feedback workload: capture shader, primitive, blend, depth, and
+overwrite semantics, then consider attachment ping-pong or a narrowly proven
+feedback/interlock path. Separately re-profile the remaining PPU/SPU guest-
+execution critical path without treating concurrent coherence waits as
+additive opportunity. Keep the official 1280x720/100% configuration and treat
+the removed historical WCB/WDB patch only as a later canary.
 
-Asynchronous GO requires at least 85% definitive dependency coverage and at
-least 10 ms/frame of conservatively de-duplicated safe hide. A credible 30-FPS
-line further requires about 14 ms/frame hide, predicted frame time `Tpred <=
-35 ms`, and an optimistic demand envelope at or below 33.3 ms. STOP that route
-if coverage is below 70%, safe hide is below 7 ms/frame, or even optimistic
-`Tpred` exceeds 35 ms. Repair the oracle, without inferring zero opportunity,
-if a validity gate fails.
-
-Overlay-on timing is attribution only. `CELLJOIN *_interval_sum_us` and
-`MFCSLACK *_slack_sum_us` are overlapping arithmetic sums, not wall time, FPS,
-or additive critical-path savings. Even an offline union is a counterfactual
-bound until a later behavior-changing overlay-off A/B. No broker or other
-optimization is implemented in this checkpoint.
-
-The oracle has no hard-coded title/bedroom address, PC, observed size, identity,
-cadence, or rank key. Current live section/producer identity and execution rank
-participate only in exact plan equality; no fixed bedroom value selects a
-group. Policy inputs are general emulator semantics: ordered plan, owner/session/
-producer generations, range coverage, renderer/directory lifetime, MFC GET/tag,
-and guest ordering. A bedroom-only positive result still requires distinct-
-scene validation after a behavior-changing prototype exists.
-
-Direct PPU JIT accesses still rely on host protection and remain a later
-producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
-treat the removed historical WCB/WDB patch only as a canary. The v2 window's
-roughly 15 ms/frame of true readback wait is material, but removing all of it
-would still leave about 6--7 ms/frame to reach 30 FPS.
+The bedroom remains a controlled microscope. No production rule may use its
+address, PC, transfer size, section identity/rank, title identity, or cadence.
+Any renderer or execution candidate must be selected by general emulator
+semantics, demonstrate a material overlay-off improvement, and survive
+correctness/performance validation in distinct gameplay scenes before it can
+support a 30-FPS claim.
 
 ## Current source work
 
@@ -589,7 +602,8 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   current-exact-owner and 1,599 directory rejections. The post-flush receipt is
   too late for the concurrent reader herd. Do not broaden or performance-test
   this inert branch; its behavioral path is removed in the current working tree.
-- Launch-ready behavior-neutral CELLJOIN + MFCSLACK checkpoint `c25fb7dc2`:
+- Completed behavior-neutral CELLJOIN + MFCSLACK checkpoint/capture at
+  `c25fb7dc2`:
   fixed exact-plan cohorts join same renderer/directory/section/producer/
   generation semantics
   across same or different native fault pages, then conservatively prove Q/D/U,
@@ -602,7 +616,12 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   restart lifetime binding, are resolved. The preserved app is
   `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-c25fb7dc-celljoin-mfcs.app`;
   exact artifact identity, protocol, and numeric enum maps are in
-  `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`.
+  `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`. The valid strict interior contains 781
+  frames, 3,493 no-readback followers, a 0.652 ms/frame critical union, and
+  4,274 MFCSLACK candidates all censored as ordered GETLB. Both measured broker
+  directions hit their STOP gates; the capture boundary, impossible
+  2.075 ms/frame async upper bound, and barrier-aware-unknown nuance are in
+  `CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md`.
 
 At `6fd9d4968`, the affected Release+ThinLTO build and full app link pass, all
 20 focused Cell-access tests pass, and the pin/lifecycle subset passes 100
@@ -610,8 +629,9 @@ shuffled repetitions. The root full suite passes 215/215 enabled tests with two
 existing tests disabled, and two independent source audits pass. The earlier
 13/211 result belongs to lifetime preparation, eight/206 to the ownership
 summary, 198 to oracle v2, and 195 to historical v1. Runtime Vulkan validation
-is complete and negative: none of these source results or the zero-hit overlay
-capture is a gameplay-performance or FPS claim.
+and the coherence-broker measurement gate are complete and negative for
+implementation: none of these source results or overlay captures is a gameplay-
+performance or FPS claim.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
@@ -659,6 +679,16 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   exact-interval SHA-256 is
   `ff9f023f66c471bdd9665a7de1e614f41e14455ba9145821840eb95da32a6b54`,
   and its exact source byte range is `[13549702, 15053344)`.
+- The completed CELLJOIN/MFCSLACK capture is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/celljoin-mfcs-2026-08-08-c25fb7dc`.
+  Its manifest SHA-256 is
+  `3bf1d371a48163d2d2f45e1dd70a90f7d75120f701ad2a8bc0c3ad13bc2634f0`,
+  full-log SHA-256 is
+  `b595d91765364e1cb24c0778df292ac37ae7d85599a965d1befca2f8643fa7ad`,
+  exact raw-interval SHA-256 is
+  `a7f0c73e464021aefbd98900de5e0787cc3ad142ea7a7ce41f69ce48d0705ea7`,
+  and its authoritative zero-based half-open source range is
+  `[27906514, 38217332)`.
 - The valid oracle-v2 capture is externally preserved at
   `/Users/hamza/Documents/rpcs3-repro/artifacts/cellfault-v2-2026-08-08-e0be3532`.
   Its manifest SHA-256 is

@@ -21,7 +21,7 @@ coherence ledger. These diagnostics have already ruled out several attractive
 but ineffective ideas; see
 [`EXPERIMENTS.md`](EXPERIMENTS.md) for the result ledger and
 [`STATE.md`](STATE.md) for the detailed current model and safety notes. The
-selected architecture and its correctness gates are in
+coherence architecture record and its correctness gates are in
 [`COHERENCE_ARCHITECTURE.md`](COHERENCE_ARCHITECTURE.md). The first live
 fault-oracle capture and its exact validity boundary are recorded in
 [`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md); the
@@ -31,9 +31,12 @@ The accepted live proof of the behavior-preserving ownership summary is in
 [`OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`](OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md).
 The decisive zero-hit runtime result for the first collateral-GET receipt is in
 [`COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`](COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md).
-The exact current-source design and one-run decision protocol for its behavior-
+The exact source design and predeclared decision protocol for its behavior-
 neutral successor are in
 [`CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md`](CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md).
+The completed capture and decisive STOP result for both broker directions are
+in
+[`CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md`](CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md).
 
 Important measurement rules:
 
@@ -121,15 +124,34 @@ paths are censored rather than credited. The same-owner SPU thread-group
 restart lifetime is generation-bound and covered by focused tests. The focused
 suite passes 52/52, the root suite passes 247/247 enabled with two disabled,
 the Release+ThinLTO full app link passes, and all audited blockers are resolved.
-This checkpoint is launch-ready for its bounded behavior-neutral capture.
+This checkpoint supplied the bounded behavior-neutral capture without changing
+an access outcome.
 
-No optimization is implemented. One bounded overlay-on run is next, using the
-zero-drop/exhaustion and predeclared GO/STOP gates in the protocol document.
-Overlay timing, raw interval sums, and slack sums are attribution only: they are
-not wall time, FPS, or realized savings. A live-owner broker is authorized only
-if offline de-duplicated evidence clears the materiality gate. Receipt v1's
-failure does not invalidate the architecture-scale coherence evidence, but it
-contributes zero realized saving toward 30 FPS.
+The run passes every integrity gate and closes a strict 781-frame interior.
+CELLJOIN finds 781 exact homogeneous SPU GET cohorts and 3,493 proven
+no-readback followers (4.472/frame), but their de-duplicated critical Q/tail
+union is only 0.652 ms/frame, below the synchronous 1.5 ms/frame STOP line.
+Only 4,274 of 6,408 handled read attempts (66.70%) enter the accepted herd,
+also below the 70% GO share. MFCSLACK exactly joins all 4,274 candidates, but
+every enclosing command is ordered `MFC_GETLB_CMD` (`0x45`) and censored as
+`outer_barrier_or_fence`; valid deferrable work and safe hide are both zero.
+
+No optimization is implemented. Both the synchronous single-flight and
+asynchronous MFC coherence-broker directions are stopped, and another bedroom
+run is not warranted. Earlier aggregate SPU wait totals were real but heavily
+concurrent, so they were not additive recoverable frame time. Active
+architecture work now returns to general non-coherence bottlenecks, led by the
+dominant framebuffer-feedback path and guest execution. The overlay-on
+16.89567-FPS context is attribution only, not a performance comparison.
+The asynchronous STOP is a protocol decision, not proof that GETLB blocks
+ordinary SPU computation: barrier-aware overlap remains unmeasured and would
+require a revised tracker that preserves queue, tag, fence, and local-store-use
+semantics. It is not worth repairing the tracker for this herd alone: even
+unrealistically deleting every complete candidate-to-outer-completion span
+produces only a 2.075 ms/strict-interior-frame union, still below the 7 ms/frame
+asynchronous STOP line and far below the roughly 14 ms/frame needed for 30 FPS.
+That scale bound covers the admitted cohort subset, not every conservative
+unknown-generation read rejection or readback in the game.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,

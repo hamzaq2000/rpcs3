@@ -7,8 +7,20 @@ result is preserved in
 [`FAULT_ORACLE_CAPTURE_F35963BE.md`](FAULT_ORACLE_CAPTURE_F35963BE.md); the
 valid oracle-v2 result and exact artifact identity are in
 [`FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`](FAULT_ORACLE_V2_CAPTURE_E0BE3532.md).
+The later exact joinability/slack gate is complete and stops both proposed
+coherence brokers; its boundary and decision are in
+[`CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md`](CELLJOIN_MFCSLACK_CAPTURE_C25FB7DC.md).
 
-## Why this is the leading CPU-side target
+Cell/RSX coherence was the leading CPU-side hypothesis because the aggregate
+wait volume was real and large. It is no longer the active implementation
+direction. Exact offline union proves that the joinable wait tail is only
+0.652 ms/frame, and all matched list GETs are ordered `GETLB` commands outside
+MFCSLACK v1's creditable scope. Even the impossible union of their complete
+candidate-to-outer-completion spans is only 2.075 ms/strict-interior frame.
+The remaining architecture search returns to general non-coherence renderer
+and guest-execution bottlenecks.
+
+## Why this became the leading CPU-side target
 
 The clean 58.716-second CELLSTAT interval rendered 1,043 frames at 17.76 FPS
 with no compiler activity or recovery timeout. Per frame it contained:
@@ -343,7 +355,7 @@ consumes a receipt, no successor copy optimization is present, and the
 historical `6fd9d4968` verification/artifact must not be attributed to
 `c25fb7dc2`.
 
-## Phase 3: live-owner joinability oracle and MFC coherence broker
+## Phase 3: live-owner joinability oracle and stopped coherence brokers
 
 The 7,467 exact-owner rejections establish candidate volume and ordering, but
 not joinability or recoverable time. Commit `c25fb7dc2` therefore implements a
@@ -398,13 +410,15 @@ The focused suite passes 52/52, the root suite passes 247/247 enabled with two
 disabled, and the Release+ThinLTO full app link passes. All findings from two
 independent source audits are resolved, including explicit lifecycle-generation
 binding and regression coverage for a same-owner SPU thread-group restart. The
-checkpoint is committed, pushed, and launch-ready. Its preserved executable is
+checkpoint is committed, pushed, and supplied the completed bounded capture.
+Its preserved executable is
 `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-c25fb7dc-celljoin-mfcs.app`
 (SHA-256
 `aede4a855a00244c17ec68cbc17d610a5d46ee4d9659db726d041344c04b12f1`).
 
-Use exactly one bounded overlay-on run. Validity requires zero loss/exhaustion
-and only exact-complete cohorts plus `valid=1, censor=0` slack records.
+The predeclared protocol required exactly one bounded overlay-on run. Validity
+requires zero loss/exhaustion and only exact-complete cohorts plus
+`valid=1, censor=0` slack records.
 Synchronous GO requires >=70% of exact-owner attempts in cohorts
 of multiplicity >=2, >=4 validated followers/frame, >=80% of followers no-
 readback under the same closure, and >=2.5 ms/frame in the offline critical
@@ -422,39 +436,43 @@ Hard-coded bedroom address, guest/host PC, observed transfer-size signature,
 previously observed section identity/rank, cadence, and title identity are not
 policy keys. Current live identity/rank remains part of exact plan equality.
 
-If the gate passes, implement synchronous generation-keyed single-flight
-first. One leader owns the legacy synchronization for an exact current owner;
-followers may join only while the renderer, VM, section lifetime, content
-generation, and requested coverage remain pinned. Publish readiness only after
-the real synchronization has completed. Cancellation, generation advance,
-unmap, teardown, ambiguity, or failed proof wakes followers into existing safe
-handling without exposing partial local-store data. The prototype must reduce
-handled faults/handoffs and primary submissions rather than merely replacing a
-signal with a mutex wait.
+The bounded run passes every integrity gate and lands in both STOP bands. Its
+strict first-to-last summary interior contains 781 frames and 6,408 handled
+read probes. CELLJOIN accepts 5,055 exact-plan members and 1,562 leaders. The
+781 homogeneous SPU GET cohorts contain 4,274 members and 3,493 proven
+no-readback followers, or 4.472 followers/frame. This is 84.55% of the already
+accepted exact-plan subset but only 66.70% of all handled reads, below the 70%
+GO share. More importantly, offline de-duplication reduces the critical Q/tail
+union to **0.652 ms/frame**, below the 1.5 ms/frame synchronous STOP line.
 
-If true readbacks remain and the oracle proves issue-to-consumption slack, use
-the existing 16-entry MFC/tag machinery to make only those conflicting commands
-explicit asynchronous coherence requests:
+MFCSLACK exactly joins and terminalizes all 4,274 candidates with zero loss,
+overflow, or unexplained live state. Every outer command is `0x45`
+(`MFC_GETLB_CMD`) and every result is censor 5,
+`outer_barrier_or_fence`. The element-level base transfer appears as GET
+`0x40`, but the enclosing list command carries the guest ordering edge. There
+are zero valid deferrable candidates and **0 ms/frame safe hide**, below the
+7 ms/frame asynchronous STOP line.
 
-- leave conflicting commands pending without an artificial batching delay;
-- coalesce overlapping ranges and texture sections already waiting;
-- close and submit the primary command buffer once per natural batch;
-- represent one combined readback dependency;
-- complete through existing tag, barrier, and fence semantics;
-- for GET, read back before copying guest memory into the owning SPU's local
-  store;
-- for PUT, stage the local-store payload at issue so asynchronous work cannot
-  race later LS modification;
-- keep atomic MFC transactions synchronous initially.
+Do not implement either broker. A synchronous leader/follower mechanism would
+replace a real herd with more lifetime, cancellation, and wakeup machinery for
+less than the predeclared materiality floor. An asynchronous request would need
+a new barrier-aware proof: GETLB orders MFC commands but does not by itself
+block ordinary SPU computation, so censor 5 leaves that narrower viability
+unknown. It is nevertheless immaterial for this herd. Even if every candidate's
+entire candidate-to-outer-completion span were unrealistically erased, its
+de-duplicated union is 1.620671 seconds total, 2.028 ms per 799 package periods
+or 2.075 ms per 781 strict-interior frames. Correlated full-fault and flush-wait
+unions independently close at about 2.025 and 1.879 ms/frame. All are far below
+the 7 ms asynchronous STOP line and roughly 14 ms needed for 30 FPS.
 
-Oracle v2 finds repeated same-generation GET handoffs, but neither it nor the
-zero-hit receipt run proves issue-to-consumption slack. CELLJOIN/MFCSLACK is the
-current measurement gate; no broker exists yet. If the bounded run finds true,
-immediately consumed dependencies with no safe overlap window, this is a real
-synchronization bound rather than an implementation accident. Stop rather than
-moving the same wait to tag consumption.
+Loosening exact plan, coverage, generation, barrier, or fence proof to
+manufacture a positive result would be a correctness regression. Do not repair
+MFCSLACK solely for this secondary-scale herd. The capture is complete; no
+repeat bedroom run is warranted. This impossible bound covers the admitted
+cohort subset, not conservative unknown-generation read rejections, so it is a
+scale check on the measured route rather than a proof about every game readback.
 
-## Deterministic PPU fault
+## Historical separate PPU-fault hypothesis
 
 The one-per-frame PPU fault is independently valuable. In the valid v2 window,
 its outer duration is 12.58 ms/frame and its true GPU/readback wait is about
@@ -468,6 +486,12 @@ known RSX synchronization point rather than waiting for the consumer fault. If
 it is only another-lane collision, the existing ARM64 memory decoder may allow
 a supported scalar load/store to use the sudo alias while preserving sibling
 protection; SIMD, pair, and ambiguous operations retain the old fault path.
+
+This remains a historical semantic hypothesis, not the current implementation
+step. The completed SPU herd gate makes coherence a secondary-scale direction;
+new work first returns to the dominant renderer-feedback and guest-execution
+bottlenecks rather than extending the broker architecture from this bedroom
+capture.
 
 ## Production generalization rule
 
@@ -506,17 +530,23 @@ The valid v2 window measured 55.065 ms/frame; 30 FPS requires 33.333 ms, so the
 gap is 21.73 ms/frame. It exposes roughly 14.94 ms/frame of true GPU/readback
 wait on deterministic faults. Even the impossible upper bound of eliminating
 all of that wait leaves about 40.1 ms/frame and another 6.8 ms/frame to recover.
-The 6.65-per-frame no-readback GET herd is therefore important alongside the
-true readbacks, but neither proves the remaining saving. Receipt v1 realizes
-none of this bound: it had zero hits because it waited until after exact-owner
-retirement. The current behavior-neutral CELLJOIN/MFCSLACK oracle must now
-quantify how much of the herd and readback latency is actually coalescible or
-overlap-capable under its exact completion and censor gates.
-Reaching 30 likely also requires work on the framebuffer-feedback path, guest
-execution, or both.
+That aggregate evidence justified measuring the 6.65-per-frame no-readback GET
+herd, but it did not establish recoverable time. Receipt v1 realizes none of
+the bound because it waits until after exact-owner retirement. The completed
+CELLJOIN gate now reduces the exact herd's non-overlapping critical union to
+0.652 ms/frame. Even the impossible candidate-to-outer-completion union is only
+2.075 ms/strict-interior frame, below the asynchronous STOP floor and about
+one-seventh of the roughly 14 ms/frame hide needed for a credible 30-FPS line.
+
+Coherence brokers therefore do not close the 21.73 ms/frame gap and are no
+longer the active route. Reaching 30, if feasible, requires materially larger
+general wins in the framebuffer-feedback path, guest execution, or both. The
+dominant full-screen feedback workload should be audited for a semantically
+valid snapshot-free Vulkan design; guest execution should be re-profiled
+without treating concurrent coherence sums as additive opportunity.
 In the later, nonstationary 14-FPS sample, main-PPU guest execution alone
 occupied roughly 46 ms/frame; that is not a clean critical-path measurement,
 but it rules out treating coherence as the entire problem. A plausible route
-remains visible, but 30 FPS is not established until a correct semantic branch
-reaches at most 40 ms/frame with a separately measured remaining cost and then
-survives cross-scene validation.
+to further improvement remains visible, but 30 FPS itself is not established.
+Any new branch must show materially reduced overlay-off frame time and then
+survive cross-scene validation; a bedroom-specific rule does not qualify.

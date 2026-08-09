@@ -57,42 +57,30 @@ effective log configuration rather than only the intended YAML values.
 | Conservative collateral-GET receipt v1 (`6fd9d4968`) | A real linear, exclusion-free Vulkan framebuffer flush may publish its exact Cell-backing range, captured/current RTT generation, renderer epoch, and an intrusive RTT pin. A normal or optimized-list SPU GET may use the sudo alias only when there is no current exact owner, a protected native sibling, exactly one logical section/covering receipt, no nontexture owner, and matching pinned VM/renderer/cache/directory/generation state. Receipts survive immediate flush-to-discard but expire at frame end and clear on reset/rebind/destroy/new DMA/unmap/teardown/memory pressure. The OOM path now clears/purges under one exclusive cache lock and avoids re-entrant self-deadlock. Hook coverage includes C++ GET, fused-list whole elements, per-item/list fallback, and LLVM direct GET/GETB/GETF. The Release+ThinLTO app links; focused tests pass 20/20; pin/lifecycle tests pass 100 shuffled repetitions; the root suite passes 215/215 enabled with two disabled; two independent source audits pass | Source checkpoint only. It initiates no readback, leaves siblings protected, does not mutate `flushed`/discard/predictor state, and falls back before LS modification on every failed or ambiguous proof. The next row records its completed runtime gate; source verification alone never implied reachability or an FPS result |
 | Negative receipt-v1 runtime capture (`6fd9d4968`) | Exact slice: 876 package-`0x202` markers/875 periods in 44.990309 s = 19.448633 FPS with debug overlay. The 44.155817-second counter interior added zero `ready_hit`, 7,467 `ready_exact_owner`, 1,599 `ready_directory`, 8,205 handled reads, 9,916 SPU and 859 PPU renderer faults, 8,205 flush waits/11.171823 aggregate seconds, and 5,154 GPU/readback waits/about 17.777 aggregate seconds. Eight recounts and every ownership safety counter were clean. One late SPU compile; zero kick/device-loss/audio-switch/fatal events | Safe but inert. Readers preflight while the exact owner still exists; a receipt published by the later legacy flush cannot help the already-concurrent herd. The overlay run is not an FPS comparison, the compile cannot explain zero hits, and no repeat is warranted. Do not loosen exact-owner safety or A/B this branch. Measure generation-keyed live-owner joinability and MFC issue-to-tag-consumption slack before implementing a single-flight broker |
 | Launch-ready behavior-neutral CELLJOIN/MFCSLACK oracle (`c25fb7dc2`) | Receipt-v1 copy/receipt behavior is removed. CELLJOIN groups exact ordered plans across same or different native pages while retaining each member range, then accepts Q/D/U and one-materializer/no-op completion only under exact generation, execution, coverage, and queue-release proof. MFCSLACK follows matched direct unordered GETL members through tag update, publication, first RdTagStat demand, and returned bits; ambiguous, immediate, ordered, later-same-tag, unsupported, overflow, lifecycle, and incomplete paths are censored. Explicit lifecycle generation closes same-owner SPU thread-group restart reuse. Focused tests pass 52/52, the root suite passes 247/247 enabled with two disabled, the Release+ThinLTO full app link passes, and all audited blockers are resolved. The preserved app is `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-c25fb7dc-celljoin-mfcs.app` | This is an attribution oracle, not an optimization. Aggregate interval/slack sums are overlapping arithmetic sums, not wall time or FPS. Use exactly one bounded overlay-on capture and apply the predeclared gates in `CELLJOIN_MFCSLACK_ORACLE_PROTOCOL.md` before authorizing any broker |
+| Valid CELLJOIN/MFCSLACK capture (`c25fb7dc2`) | Raw interval: 799 periods/47.290224 s = 16.89567 overlay-attribution FPS; strict summary interior: 781 frames and 6,408 handled reads. There are 5,055 exact-plan members and 1,562 leaders; 781 homogeneous SPU GET cohorts contain 4,274 members and 3,493 proven no-readback followers (4.472/frame). The herd is 84.55% of accepted exact-plan members but only 66.70% of all handled reads. Offline de-duplicated critical Q/tail union is 0.652139 ms/marker-window frame and 0.651551 ms/strict-interior frame. MFCSLACK exactly joins all 4,274 candidates, but every one is ordered command `0x45` (`MFC_GETLB_CMD`) and terminal censor 5; valid candidates and safe credited hide are zero. Even unrealistically deleting complete candidate-to-outer spans yields only 2.075 ms/strict-interior frame. All integrity/loss/overflow/live gates pass | **STOP both measured broker directions.** The synchronous union is below the predeclared 1.5 ms/frame STOP line; async credited hide and even the impossible upper bound are below 7 ms/frame. Aggregate SPU waits were concurrent rather than additive recoverable frame time. Receipt v1 remains safe but inert, and live-owner single-flight is measured as too small to justify implementation. GETLB can overlap ordinary SPU computation, so barrier-aware async viability is unknown rather than disproved; it would require a revised proof/tracker, but this herd cannot justify one. Do not repeat this bedroom run or loosen semantics; return now to general non-coherence bottlenecks |
 
 ## Next experiments
 
-1. Run the preserved `c25fb7dc2` behavior-neutral oracle once, overlay on, for
-   30--60 seconds and at least 600 complete package-`0x202` periods, followed by
-   a two-second drain.
-   Require zero loss/exhaustion and exact completion/censor gates. Synchronous
-   GO requires at least 70% of exact-owner attempts in multiplicity>=2 cohorts,
-   4 validated followers/frame, 80% no-readback followers under the same closure,
-   and a 2.5 ms/frame critical Q/tail union; STOP below 1.5 ms/frame or 2
-   followers/frame. Async GO requires 85% definitive dependency coverage and
-   10 ms/frame safe hide; a credible 30-FPS line needs about 14 ms/frame,
-   `Tpred <= 35 ms`, and an optimistic demand envelope <=33.3 ms. Async STOP
-   applies below 70% coverage, below 7 ms/frame safe hide, or when even
-   optimistic `Tpred > 35 ms`. Do not interpret interval/slack sums as wall time
-   or FPS, repeat receipt v1, or run an overlay-off comparison for its zero-hit
-   branch.
-2. If joinability is positive, implement synchronous generation-keyed
-   single-flight first: one leader performs the required synchronization and
-   same-generation followers join it. Require redundant handled faults/
-   handoffs and primary submissions to collapse without corruption or moved
-   wait time.
-3. Add asynchronous producer scheduling only where the measured MFC slack can
-   hide a true readback while preserving tags, barriers, fences, local-store,
-   atomics, pause, savestate, cancellation, and shutdown semantics.
-4. Validate any successful semantic broker in distinct gameplay scenes before
-   making a game-general or FPS claim.
-5. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+1. Stop receipt-v1, synchronous single-flight, and asynchronous MFC coherence-
+   broker work. The valid `c25fb7dc2` run is decisively below both predeclared
+   STOP bands; another bedroom run or relaxed ordering/coverage proof is not
+   warranted. Preserve barrier-aware asynchronous viability as unknown: only a
+   new tracker proving GETLB queue/tag/fence and local-store-use boundaries
+   could revisit it, and that is not the current next step.
+2. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-6. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+3. Re-profile the remaining PPU/SPU guest-execution critical path after removing
+   coherence wait sums from the opportunity model. Select only emulator-wide
+   execution mechanisms, not bedroom PCs, addresses, transfer sizes, or cadence.
+4. Validate any promising semantic renderer or execution change in distinct
+   gameplay scenes before making a game-general or FPS claim.
+5. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-7. Only after the supported renderer path is measured, isolate-test the removed
+6. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-8. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+7. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
