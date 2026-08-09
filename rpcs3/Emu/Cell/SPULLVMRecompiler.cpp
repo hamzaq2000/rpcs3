@@ -5258,6 +5258,17 @@ public:
 					m_ir->CreateBr(next);
 					m_ir->SetInsertPoint(copy);
 
+					llvm::BasicBlock* ready_copy_done = nullptr;
+					if (cmd & MFC_GET_CMD)
+					{
+						const auto regular_copy = llvm::BasicBlock::Create(m_context, "", m_function);
+						ready_copy_done = llvm::BasicBlock::Create(m_context, "", m_function);
+						const auto ready = call("spu_try_read_ready_cell_backing", &spu_try_read_ready_cell_backing,
+							m_thread, eal.value, dst, zext<u32>(size).eval(m_ir));
+						m_ir->CreateCondBr(ready, ready_copy_done, regular_copy, m_md_unlikely);
+						m_ir->SetInsertPoint(regular_copy);
+					}
+
 					llvm::Type* vtype = get_type<u8[16]>();
 
 					switch (csize)
@@ -5342,6 +5353,12 @@ public:
 							std::memcpy(dst, src, size);
 						};
 						call("spu_memcpy", +spu_memcpy, dst, src, zext<u32>(size).eval(m_ir));
+					}
+
+					if (ready_copy_done)
+					{
+						m_ir->CreateBr(ready_copy_done);
+						m_ir->SetInsertPoint(ready_copy_done);
 					}
 
 					// Disable certain thing

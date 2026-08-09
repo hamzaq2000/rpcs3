@@ -973,6 +973,11 @@ public:
 	} prio{ this };
 };
 
+// Attempts a synchronous GET from Cell backing that a renderer has explicitly
+// certified as current. Returns false without modifying dst on any ambiguity.
+bool spu_is_ready_cell_backing_range_eligible(u32 eal, u32 size) noexcept;
+bool spu_try_read_ready_cell_backing(spu_thread* spu, u32 eal, u8* dst, u32 size);
+
 class spu_function_logger
 {
 	spu_thread& spu;

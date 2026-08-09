@@ -2134,6 +2134,7 @@ namespace rsx
 		{
 			if (g_cfg.video.write_color_buffers || g_cfg.video.write_depth_buffer)
 			{
+				std::lock_guard lock(m_cache_mutex);
 				auto* region_ptr = find_cached_texture(rsx_range, { .gcm_format = RSX_GCM_FORMAT_IGNORED }, false, false, false);
 				if (region_ptr && region_ptr->is_locked() && region_ptr->get_context() == texture_upload_context::framebuffer_storage)
 				{
@@ -2337,7 +2338,7 @@ namespace rsx
 			m_storage.purge_unreleased_sections();
 		}
 
-		virtual bool handle_memory_pressure(problem_severity severity)
+		bool handle_memory_pressure_locked(problem_severity severity)
 		{
 			if (m_storage.m_unreleased_texture_objects)
 			{
@@ -2352,6 +2353,19 @@ namespace rsx
 			}
 
 			return false;
+		}
+
+		virtual bool handle_memory_pressure(problem_severity severity)
+		{
+			std::unique_lock lock(m_cache_mutex, std::defer_lock);
+			if (!lock.try_lock())
+			{
+				// OOM callbacks may re-enter while this thread already owns the
+				// cache. Skipping collection is safer than self-deadlocking.
+				return false;
+			}
+
+			return handle_memory_pressure_locked(severity);
 		}
 
 		void trim_sections()

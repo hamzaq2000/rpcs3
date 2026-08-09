@@ -4,6 +4,7 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_ptr.h"
 #include "Emu/Memory/vm_reservation.h"
+#include "Emu/Memory/vm_locking.h"
 
 #include "Loader/ELF.h"
 #include "Emu/VFS.h"
@@ -24,7 +25,9 @@
 #include "Emu/Cell/timers.hpp"
 
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
+#include "Emu/RSX/Common/cell_access_coherence.h"
 #include "Emu/RSX/RSXCoherenceStats.h"
+#include "Emu/RSX/RSXThread.h"
 
 #include <cmath>
 #include <cfenv>
@@ -2039,6 +2042,60 @@ void spu_thread::push_snr(u32 number, u32 value)
 	});
 }
 
+bool spu_is_ready_cell_backing_range_eligible(u32 eal, u32 size) noexcept
+{
+	if (!size || size > 0x4000 || eal >= RAW_SPU_BASE_ADDR ||
+		(eal >> 28) == (rsx::constants::local_mem_base >> 28))
+	{
+		return false;
+	}
+
+	const u64 end = u64{eal} + size - 1;
+	return end <= 0xffff'ffffull && (eal >> 16) == (end >> 16);
+}
+
+bool spu_try_read_ready_cell_backing(spu_thread* spu, u32 eal, u8* dst, u32 size)
+{
+	using rsx::cell_access::page_probe_result;
+	using rsx::cell_access::ready_get_result;
+
+	if (!spu || !dst ||
+		g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug ||
+		!spu_is_ready_cell_backing_range_eligible(eal, size))
+	{
+		return false;
+	}
+
+	if (rsx::cell_access::g_ownership_directory.probe(eal, size) != page_probe_result::maybe_texture ||
+		!vm::check_addr(eal, vm::page_readable, size))
+	{
+		return false;
+	}
+
+	vm::range_lock(spu->range_lock, eal, size);
+	struct range_unlocker
+	{
+		atomic_t<u64, 128>* lock;
+		~range_unlocker() { lock->release(0); }
+	} range_guard{spu->range_lock};
+
+	ready_get_result result = ready_get_result::fallback_no_renderer;
+	{
+		auto lifetime = rsx::cell_access::g_ownership_directory.begin_renderer_lifetime_session();
+		if (auto* renderer = lifetime.renderer())
+		{
+			result = renderer->try_read_ready_cell_backing(eal, size, dst, lifetime.epoch());
+		}
+	}
+
+	if (rsx::coherence_stats::is_enabled())
+	{
+		rsx::cell_access::g_ownership_directory.record_ready_get_result(result);
+	}
+
+	return result == ready_get_result::hit_backing_receipt;
+}
+
 void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls, bool is_list)
 {
 	perf_meter<"DMA"_u32> perf_;
@@ -2144,6 +2201,11 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 	if (_this)
 	{
 		_this->last_faddr = 0;
+	}
+
+	if (is_get && spu_try_read_ready_cell_backing(_this, eal, dst, args.size))
+	{
+		return;
 	}
 
 	// It is so rare that optimizations are not implemented (TODO)
@@ -2921,9 +2983,13 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					// Type which is friendly for fused address calculations
 					constexpr usz _128 = 128;
 
+					bool ready_attempted[fetch_size]{};
+					bool ready_hit[fetch_size]{};
+
 					// This whole function relies on many constraints to be met (crashes real MFC), we can a have minor optimization assuming EA alignment to be +16 with +16 byte transfers
-#define MOV_T(type, index, _ea) { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
-#define MOV_128(dst_index, item_index, _source_ea) { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } void()
+#define TRY_READY_ITEM(item_index) (ready_attempted[item_index] ? ready_hit[item_index] : (ready_attempted[item_index] = true, ready_hit[item_index] = spu_try_read_ready_cell_backing(this, items[item_index].ea, dst + item_index * utils::align<u32>(s_size, 16) + (s_size < 16 ? items[item_index].ea % 16 : 0), s_size)))
+#define MOV_T(type, index, _ea) do { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); if (!TRY_READY_ITEM(index)) { *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } } while (0)
+#define MOV_128(dst_index, item_index, _source_ea) do { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); if (!TRY_READY_ITEM(item_index)) { mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } } while (0)
 
 					switch (s_size)
 					{
@@ -3172,6 +3238,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					}
 #undef MOV_T
 #undef MOV_128
+#undef TRY_READY_ITEM
 					// Optimization miss, revert changes
 					arg_lsa -= fetch_size * utils::align<u32>(s_size, 16);
 					item_ptr -= fetch_size;
@@ -3195,6 +3262,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 			const u8* src = vm::_ptr<u8>(addr);
 			u8* dst = this->ls + arg_lsa + (addr & 0xf);
 
+			if (!spu_try_read_ready_cell_backing(this, addr, dst, size))
+			{
 			switch (u32 _size = size)
 			{
 			case 1:
@@ -3255,6 +3324,7 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 				}
 
 				break;
+			}
 			}
 			}
 

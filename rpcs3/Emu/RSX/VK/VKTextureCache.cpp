@@ -66,6 +66,8 @@ namespace vk
 	void cached_texture_section::dma_transfer(vk::command_buffer& cmd, vk::image* src, const areai& src_area, const utils::address_range32& valid_range, u32 pitch)
 	{
 		ensure(src->samples() == 1);
+		clear_cell_backing_receipt();
+		m_synchronized_content_generation = 0;
 
 		if (!m_device)
 		{
@@ -395,6 +397,133 @@ namespace vk
 		{
 			auto disposable = vk::disposable_t::make(new cached_image_reference_t(this, tex.get_texture()));
 			vk::get_resource_manager()->dispose(disposable);
+		}
+	}
+
+	rsx::cell_access::ready_get_result texture_cache::try_read_ready_cell_backing(
+		u32 address, u32 size, void* dst, u64 epoch)
+	{
+		using rsx::cell_access::page_probe_result;
+		using rsx::cell_access::ready_get_result;
+
+		if (!dst || !size || u64{address} + size - 1 > 0xffff'ffffull)
+		{
+			return ready_get_result::fallback_directory;
+		}
+
+		const auto requested = utils::address_range32::start_length(address, size);
+		reader_lock cache_lock(m_cache_mutex);
+		auto stable = rsx::cell_access::g_ownership_directory.begin_stable_session();
+		const auto ownership = stable.probe(address, size);
+		if (ownership.lifetime_epoch != epoch)
+		{
+			return ready_get_result::fallback_epoch;
+		}
+		if (ownership.maybe_nontexture)
+		{
+			return ready_get_result::fallback_nontexture;
+		}
+		if (ownership.texture != page_probe_result::maybe_texture)
+		{
+			return ready_get_result::fallback_directory;
+		}
+
+		bool native_no_sibling = false;
+		for (auto it = m_storage.range_begin(requested, rsx::section_bounds::locked_range, true);
+			it != m_storage.range_end(); it++)
+		{
+			auto& section = *it;
+			if (section.get_section_range().overlaps(requested))
+			{
+				return ready_get_result::fallback_exact_owner;
+			}
+
+			if (section.get_protection() == utils::protection::no)
+			{
+				native_no_sibling = true;
+			}
+		}
+
+		if (!native_no_sibling)
+		{
+			return ready_get_result::fallback_no_native_sibling;
+		}
+
+		const rsx::cell_access::cell_backing_receipt* matching_receipt = nullptr;
+		u32 logical_sections = 0;
+		bool partial_or_stale_receipt = false;
+		for (auto it = m_storage.range_begin(requested, rsx::section_bounds::full_range, false);
+			it != m_storage.range_end(); it++)
+		{
+			auto& section = *it;
+			logical_sections++;
+			const auto& receipt = section.get_cell_backing_receipt();
+			const auto covered = requested.get_intersect(section.get_section_range());
+			if (receipt.matches(covered, epoch))
+			{
+				if (section.get_context() != rsx::texture_upload_context::framebuffer_storage ||
+					!section.exists())
+				{
+					return ready_get_result::fallback_stale_generation;
+				}
+
+				auto* render_target = section.get_cell_backing_receipt_target();
+				if (!render_target ||
+					!receipt.matches_generation(render_target->get_content_generation()))
+				{
+					return ready_get_result::fallback_stale_generation;
+				}
+
+				if (matching_receipt)
+				{
+					return ready_get_result::fallback_ambiguous_receipt;
+				}
+				matching_receipt = &receipt;
+			}
+			else if (receipt.range.valid() && receipt.range.overlaps(requested))
+			{
+				partial_or_stale_receipt = true;
+			}
+		}
+
+		if (logical_sections != 1 || partial_or_stale_receipt)
+		{
+			return ready_get_result::fallback_ambiguous_receipt;
+		}
+		if (!matching_receipt)
+		{
+			return ready_get_result::fallback_no_receipt;
+		}
+
+		// VM range, renderer lifetime, cache lifetime, and ownership stability are
+		// all pinned by the caller/current scopes. Preserve native sibling NO state.
+		std::memcpy(dst, vm::get_super_ptr<const u8>(address), size);
+		return ready_get_result::hit_backing_receipt;
+	}
+
+	void texture_cache::clear_cell_backing_receipts(const utils::address_range32& range)
+	{
+		std::lock_guard cache_lock(m_cache_mutex);
+		for (auto it = m_storage.range_begin(range, rsx::section_bounds::full_range, false);
+			it != m_storage.range_end(); it++)
+		{
+			it->clear_cell_backing_receipt();
+		}
+	}
+
+	void texture_cache::clear_cell_backing_receipts()
+	{
+		std::lock_guard cache_lock(m_cache_mutex);
+		clear_cell_backing_receipts_unlocked();
+	}
+
+	void texture_cache::clear_cell_backing_receipts_unlocked()
+	{
+		const auto all_memory = utils::address_range32::start_end(0, 0xffff'ffffu);
+		for (auto it = m_storage.range_begin(all_memory, rsx::section_bounds::full_range, false);
+			it != m_storage.range_end(); it++)
+		{
+			it->clear_cell_backing_receipt();
 		}
 	}
 
@@ -1530,7 +1659,18 @@ namespace vk
 
 	bool texture_cache::handle_memory_pressure(rsx::problem_severity severity)
 	{
-		auto any_released = baseclass::handle_memory_pressure(severity);
+		bool any_released;
+		// Do not let historical CPU-backing receipts retain invalidated RTTs
+		// while the surface cache is actively trying to reclaim memory.
+		{
+			std::unique_lock lock(m_cache_mutex, std::defer_lock);
+			if (!lock.try_lock())
+			{
+				return false;
+			}
+			clear_cell_backing_receipts_unlocked();
+			any_released = baseclass::handle_memory_pressure_locked(severity);
+		}
 
 		// TODO: This can cause invalidation of in-flight resources
 		if (severity <= rsx::problem_severity::low || !m_cached_memory_size)
@@ -1576,6 +1716,9 @@ namespace vk
 
 	void texture_cache::on_frame_end()
 	{
+		// Receipts only bridge the immediate post-flush GET herd. Frame expiry
+		// bounds retained surface lifetime and stale-generation scan overhead.
+		clear_cell_backing_receipts();
 		trim_sections();
 
 		if (m_storage.m_unreleased_texture_objects >= m_max_zombie_objects)

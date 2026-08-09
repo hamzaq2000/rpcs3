@@ -874,6 +874,11 @@ namespace rsx
 		coherence_stats::set_enabled(false);
 	}
 
+	cell_access::ready_get_result thread::try_read_ready_cell_backing(u32, u32, void*, u64)
+	{
+		return cell_access::ready_get_result::fallback_no_receipt;
+	}
+
 	void thread::save(utils::serial& ar)
 	{
 		[[maybe_unused]] const s32 version = GET_OR_USE_SERIALIZATION_VERSION(ar.is_writing(), rsx);
@@ -3665,10 +3670,20 @@ namespace rsx
 
 				const auto ownership = cell_access::g_ownership_directory.validation_snapshot();
 				const auto& recount = ownership.last_recount;
-				perf_log.notice("CELLDIR v=1 read_probe_n=%llu read_handled_n=%llu handled_maybe_n=%llu handled_clear_n=%llu handled_inconclusive_n=%llu unhandled_maybe_n=%llu recount_n=%llu recount_mismatch_n=%llu recount_busy_n=%llu recount_us=%llu recount_max_us=%llu underflow_n=%llu overflow_n=%llu abandoned_n=%llu sequence_error_n=%llu seq=%llu sections=%llu expected_refs=%llu observed_refs=%llu missing_refs=%llu excess_refs=%llu expected_granules=%u observed_granules=%u mismatch_granules=%u poisoned_granules=%u global_poison=%u expected_overflow=%u",
+				perf_log.notice("CELLDIR v=2 read_probe_n=%llu read_handled_n=%llu handled_maybe_n=%llu handled_clear_n=%llu handled_inconclusive_n=%llu unhandled_maybe_n=%llu ready_hit_n=%llu ready_no_renderer_n=%llu ready_epoch_n=%llu ready_nontexture_n=%llu ready_no_sibling_n=%llu ready_exact_owner_n=%llu ready_no_receipt_n=%llu ready_stale_gen_n=%llu ready_ambiguous_n=%llu ready_directory_n=%llu recount_n=%llu recount_mismatch_n=%llu recount_busy_n=%llu recount_us=%llu recount_max_us=%llu underflow_n=%llu overflow_n=%llu abandoned_n=%llu sequence_error_n=%llu seq=%llu sections=%llu expected_refs=%llu observed_refs=%llu missing_refs=%llu excess_refs=%llu expected_granules=%u observed_granules=%u mismatch_granules=%u poisoned_granules=%u global_poison=%u expected_overflow=%u",
 					ownership.read_fault_probes, ownership.read_faults_handled,
 					ownership.handled_maybe_texture, ownership.handled_clear,
 					ownership.handled_inconclusive, ownership.unhandled_maybe_texture,
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::hit_backing_receipt),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_renderer),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_epoch),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_nontexture),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_native_sibling),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_exact_owner),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_receipt),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_stale_generation),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_ambiguous_receipt),
+					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_directory),
 					ownership.recounts, ownership.recounts_with_mismatch,
 					ownership.recount_cache_busy, ownership.recount_total_us,
 					ownership.recount_max_us,

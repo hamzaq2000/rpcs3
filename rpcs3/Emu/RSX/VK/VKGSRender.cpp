@@ -791,6 +791,8 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 
 VKGSRender::~VKGSRender()
 {
+	rsx::cell_access::g_ownership_directory.unpublish_renderer_lifetime(this);
+
 	if (m_device == VK_NULL_HANDLE)
 	{
 		//Initialization failed
@@ -860,8 +862,8 @@ VKGSRender::~VKGSRender()
 	m_frame_context_storage.clear();
 
 	// Textures
-	m_rtts.destroy();
 	m_texture_cache.destroy();
+	m_rtts.destroy();
 
 	m_overlay_recording_img.reset();
 	m_stencil_mirror_sampler.reset();
@@ -1002,9 +1004,19 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 	return true;
 }
 
+rsx::cell_access::ready_get_result VKGSRender::try_read_ready_cell_backing(
+	u32 address, u32 size, void* dst, u64 epoch)
+{
+	return m_texture_cache.try_read_ready_cell_backing(address, size, dst, epoch);
+}
+
 void VKGSRender::on_invalidate_memory_range(const utils::address_range32 &range, rsx::invalidation_cause cause)
 {
 	std::lock_guard lock(m_secondary_cb_guard);
+	if (cause == rsx::invalidation_cause::unmap)
+	{
+		m_texture_cache.clear_cell_backing_receipts(range);
+	}
 
 	auto data = m_texture_cache.invalidate_range(*m_secondary_cb_list.next(), range, cause);
 	AUDIT(data.empty());
@@ -1280,10 +1292,15 @@ void VKGSRender::on_init_thread()
 			m_shaders_cache->load(&dlg);
 		}
 	}
+
+	rsx::cell_access::g_ownership_directory.publish_renderer_lifetime(this);
 }
 
 void VKGSRender::on_exit()
 {
+	// Stop new Cell tickets and wait for every active renderer/cache reader
+	// before any Vulkan backend teardown starts.
+	rsx::cell_access::g_ownership_directory.unpublish_renderer_lifetime(this);
 	GSRender::on_exit();
 	vk::destroy_pipe_compiler(); // Ensure no pending shaders being compiled
 	zcull_ctrl.release();

@@ -8,6 +8,7 @@
 #include "Emu/RSX/Common/cell_access_coherence.h"
 #include "Emu/RSX/Common/texture_cache_utils.h"
 #include "Emu/RSX/Host/MM.h"
+#include "Emu/Cell/SPUThread.h"
 
 namespace
 {
@@ -374,6 +375,117 @@ TEST(RsxCellAccessDirectory, StableSessionPinsOwnershipAndEpoch)
 	EXPECT_TRUE(completed.load(std::memory_order_acquire));
 	auto stable = directory->begin_stable_session();
 	EXPECT_TRUE(stable.probe(external.start, 1).maybe_nontexture);
+}
+
+TEST(RsxCellAccessDirectory, CellBackingReceiptRequiresCurrentGenerationAndCoversOnlyLogicalIntersection)
+{
+	cell_backing_receipt receipt;
+	const auto section = range(0x20000100, 0x180);
+	const auto request = range(0x20000080, 0x200);
+	const auto covered = request.get_intersect(section);
+	constexpr u64 epoch = 9;
+	constexpr u64 generation = 27;
+
+	receipt.publish(section, generation, epoch);
+	EXPECT_TRUE(receipt.matches(covered, epoch));
+	EXPECT_TRUE(receipt.matches_generation(generation));
+	EXPECT_FALSE(receipt.matches(request, epoch));
+	EXPECT_FALSE(receipt.matches(covered, epoch + 1));
+	EXPECT_FALSE(receipt.matches_generation(generation + 1));
+
+	receipt.clear();
+	EXPECT_FALSE(receipt.matches(covered, epoch));
+	EXPECT_FALSE(receipt.matches_generation(generation));
+}
+
+TEST(RsxCellAccessDirectory, ReadyGetRangeEligibilityRejectsUnpinnableGuestRanges)
+{
+	EXPECT_TRUE(spu_is_ready_cell_backing_range_eligible(0x10020, 0x200));
+	EXPECT_TRUE(spu_is_ready_cell_backing_range_eligible(0x1c000, 0x4000));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x1ff00, 0x200));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(rsx::constants::local_mem_base, 0x80));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(RAW_SPU_BASE_ADDR, 0x80));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0xfffffff0, 0x20));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x10000, 0));
+	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x10000, 0x4001));
+}
+
+TEST(RsxCellAccessDirectory, RendererLifetimeSessionPinsPublishedBackendAgainstTeardown)
+{
+	auto directory = std::make_unique<ownership_directory>();
+	directory->begin_renderer_lifetime_quiescent();
+	auto* renderer = reinterpret_cast<rsx::thread*>(static_cast<uintptr_t>(1));
+	directory->publish_renderer_lifetime(renderer);
+
+	std::atomic<bool> started = false;
+	std::atomic<bool> completed = false;
+	std::thread teardown;
+	{
+		auto lifetime = directory->begin_renderer_lifetime_session();
+		EXPECT_EQ(lifetime.renderer(), renderer);
+		EXPECT_EQ(lifetime.epoch(), directory->lifetime_epoch());
+		teardown = std::thread([&]
+		{
+			started.store(true, std::memory_order_release);
+			directory->unpublish_renderer_lifetime(renderer);
+			completed.store(true, std::memory_order_release);
+		});
+
+		while (!started.load(std::memory_order_acquire))
+		{
+			std::this_thread::yield();
+		}
+		EXPECT_FALSE(completed.load(std::memory_order_acquire));
+	}
+
+	teardown.join();
+	EXPECT_TRUE(completed.load(std::memory_order_acquire));
+	auto lifetime = directory->begin_renderer_lifetime_session();
+	EXPECT_EQ(lifetime.renderer(), nullptr);
+}
+
+TEST(RsxCellAccessDirectory, IntrusiveReceiptPinBlocksRetirementUntilExplicitClear)
+{
+	class test_resource final : public rsx::ref_counted
+	{
+	};
+
+	test_resource resource;
+	resource.add_ref(); // Existing NO/locked section ref.
+	intrusive_lifetime_pin<test_resource> receipt_pin;
+	receipt_pin.reset(&resource);
+	resource.release(); // Simulate discard releasing the section ref.
+
+	std::atomic<u32> phase = 0;
+	bool retained_during_retirement = false;
+	bool reusable_after_clear = false;
+	std::thread retirement([&]
+	{
+		while (phase.load(std::memory_order_acquire) < 1)
+		{
+			std::this_thread::yield();
+		}
+		retained_during_retirement = resource.has_refs();
+		phase.store(2, std::memory_order_release);
+
+		while (phase.load(std::memory_order_acquire) < 3)
+		{
+			std::this_thread::yield();
+		}
+		reusable_after_clear = !resource.has_refs();
+	});
+
+	phase.store(1, std::memory_order_release);
+	while (phase.load(std::memory_order_acquire) < 2)
+	{
+		std::this_thread::yield();
+	}
+	receipt_pin.reset();
+	phase.store(3, std::memory_order_release);
+	retirement.join();
+
+	EXPECT_TRUE(retained_during_retirement);
+	EXPECT_TRUE(reusable_after_clear);
 }
 
 TEST(RsxCellAccessDirectory, BufferedSectionConfirmedRangeExpansionTracksRealLifecycle)

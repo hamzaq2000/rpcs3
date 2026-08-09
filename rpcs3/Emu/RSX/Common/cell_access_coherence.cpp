@@ -5,6 +5,14 @@ namespace rsx::cell_access
 {
 	ownership_directory g_ownership_directory;
 
+	ownership_directory::renderer_lifetime_session::renderer_lifetime_session(ownership_directory& owner) noexcept
+		: m_owner(&owner)
+		, m_lock(owner.m_renderer_lifetime_mutex)
+		, m_renderer(owner.m_renderer)
+		, m_epoch(owner.m_lifetime_epoch.load(std::memory_order_acquire))
+	{
+	}
+
 	ownership_directory::mutation::mutation(ownership_directory& owner,
 		const utils::address_range32& old_range, bool old_no_access, bool nontexture) noexcept
 		: m_owner(&owner)
@@ -110,6 +118,28 @@ namespace rsx::cell_access
 	ownership_directory::stable_session ownership_directory::begin_stable_session() noexcept
 	{
 		return stable_session(*this);
+	}
+
+	ownership_directory::renderer_lifetime_session ownership_directory::begin_renderer_lifetime_session() noexcept
+	{
+		return renderer_lifetime_session(*this);
+	}
+
+	void ownership_directory::publish_renderer_lifetime(rsx::thread* renderer) noexcept
+	{
+		ensure(renderer);
+		std::unique_lock lock(m_renderer_lifetime_mutex);
+		ensure(!m_renderer || m_renderer == renderer);
+		m_renderer = renderer;
+	}
+
+	void ownership_directory::unpublish_renderer_lifetime(rsx::thread* renderer) noexcept
+	{
+		std::unique_lock lock(m_renderer_lifetime_mutex);
+		if (m_renderer == renderer)
+		{
+			m_renderer = nullptr;
+		}
 	}
 
 	std::pair<u32, u32> ownership_directory::granule_span(const utils::address_range32& range) noexcept
@@ -241,6 +271,8 @@ namespace rsx::cell_access
 
 	u64 ownership_directory::begin_renderer_lifetime_quiescent() noexcept
 	{
+		std::unique_lock lifetime_lock(m_renderer_lifetime_mutex);
+		ensure(!m_renderer);
 		std::unique_lock lock(m_writer_mutex);
 		const u64 previous = m_sequence.fetch_add(1, std::memory_order_acq_rel);
 		if (previous & 1)
@@ -553,6 +585,10 @@ namespace rsx::cell_access
 		m_last_recount_mismatched_granules.store(0, std::memory_order_relaxed);
 		m_last_recount_poisoned_granules.store(0, std::memory_order_relaxed);
 		m_last_recount_expected_overflow.store(false, std::memory_order_relaxed);
+		for (auto& result : m_ready_get_results)
+		{
+			result.store(0, std::memory_order_relaxed);
+		}
 	}
 
 	u16 ownership_directory::count_at(u32 address) const noexcept
@@ -573,5 +609,19 @@ namespace rsx::cell_access
 	u64 ownership_directory::lifetime_epoch() const noexcept
 	{
 		return m_lifetime_epoch.load(std::memory_order_acquire);
+	}
+
+	void ownership_directory::record_ready_get_result(ready_get_result result) noexcept
+	{
+		const usz index = static_cast<usz>(result);
+		ensure(index < m_ready_get_results.size());
+		m_ready_get_results[index].fetch_add(1, std::memory_order_relaxed);
+	}
+
+	u64 ownership_directory::ready_get_result_count(ready_get_result result) const noexcept
+	{
+		const usz index = static_cast<usz>(result);
+		ensure(index < m_ready_get_results.size());
+		return m_ready_get_results[index].load(std::memory_order_relaxed);
 	}
 }
