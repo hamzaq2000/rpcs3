@@ -165,6 +165,16 @@ namespace vk::framebuffer_feedback
 		}
 	}
 
+	std::string format_copy_map_record(const copy_map_record& record, bool prepend_comma)
+	{
+		const char outcome = record.outcome == rsx::framebuffer_feedback_oracle_outcome::new_snapshot
+			? 'N' : 'R';
+		return fmt::format("%s%llu:%x:%016llx:%llu:%c",
+			prepend_comma ? "," : "", record.copy_serial,
+			static_cast<u32>(record.route_flags), record.reject_bits,
+			record.logical_bytes, outcome);
+	}
+
 	void oracle::set_enabled(bool enabled)
 	{
 		if (m_enabled == enabled)
@@ -761,12 +771,7 @@ namespace vk::framebuffer_feedback
 			for (usz index = begin; index < end; ++index)
 			{
 				const auto& record = m_copy_map[index];
-				const char outcome = record.outcome == rsx::framebuffer_feedback_oracle_outcome::new_snapshot
-					? 'N' : 'R';
-				records += fmt::format("{}{}:{:x}:{:016x}:{}:{}",
-					records.empty() ? "" : ",", record.copy_serial,
-					static_cast<u32>(record.route_flags),
-					record.reject_bits, record.logical_bytes, outcome);
+				records += format_copy_map_record(record, !records.empty());
 			}
 
 			rsx_log.notice("FBPATH_MAP frame=%llu part=%u/%u records=%s",
@@ -820,8 +825,8 @@ namespace vk::framebuffer_feedback
 				continue;
 			}
 
-			reject_counts += fmt::format("{}{}:{}/{}/{}/{}",
-				reject_counts.empty() ? "" : ",", index, counter.requests,
+			reject_counts += fmt::format("%s%llu:%llu/%llu/%llu/%llu",
+				reject_counts.empty() ? "" : ",", static_cast<u64>(index), counter.requests,
 				counter.logical_bytes, counter.actual_copies, counter.actual_copy_bytes);
 		}
 		rsx_log.notice("FBPATH_GATE_BITS bit=requests/logical_bytes/actual_copies/actual_copy_bytes values=%s", reject_counts);

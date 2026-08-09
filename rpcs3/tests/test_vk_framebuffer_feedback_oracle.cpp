@@ -249,6 +249,10 @@ namespace
 			reject_unknown_coordinates | reject_known_partial_coverage);
 		EXPECT_EQ(record.logical_bytes, 96);
 		EXPECT_EQ(record.outcome, rsx::framebuffer_feedback_oracle_outcome::refresh);
+		EXPECT_EQ(format_copy_map_record(record, false),
+			"77:2:0000000080000001:96:R");
+		EXPECT_EQ(format_copy_map_record(record, true),
+			",77:2:0000000080000001:96:R");
 	}
 
 	TEST(TestFramebufferFeedbackOracle, CopyMapIntersectsEveryConsumerOfSnapshot)

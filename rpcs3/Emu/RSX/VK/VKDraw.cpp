@@ -1544,7 +1544,8 @@ void VKGSRender::emit_geometry(u32 sub_index)
 	}
 
 	const std::string feedback_draw_label = has_feedback_consumers
-		? fmt::format("Framebuffer feedback consumer draw={} subdraw={}", m_frame_stats.draw_calls, sub_index)
+		? fmt::format("Framebuffer feedback consumer draw=%llu subdraw=%u",
+			static_cast<u64>(m_frame_stats.draw_calls), static_cast<u32>(sub_index))
 		: std::string{};
 	vk::debug_label_scope feedback_draw_scope(*m_current_command_buffer,
 		feedback_draw_label.empty() ? nullptr : feedback_draw_label.c_str());

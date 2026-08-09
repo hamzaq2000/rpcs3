@@ -468,7 +468,7 @@ namespace vk
 		const auto dst_aspect = dst->aspect();
 		const auto dst_bpp = vk::get_format_texel_width(dst->format());
 		const std::string feedback_label = feedback_copy_serial
-			? fmt::format("Framebuffer feedback copy serial={}", feedback_copy_serial)
+			? fmt::format("Framebuffer feedback copy serial=%llu", feedback_copy_serial)
 			: std::string{};
 		const char* feedback_label_text = feedback_label.empty() ? nullptr : feedback_label.c_str();
 		// One logical interval per feedback-copy serial. A typeless or scaled

@@ -484,6 +484,8 @@ namespace vk::framebuffer_feedback
 			rsx::framebuffer_feedback_oracle_outcome::none;
 	};
 
+	std::string format_copy_map_record(const copy_map_record& record, bool prepend_comma);
+
 	struct summary
 	{
 		statistics frame{};
