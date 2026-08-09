@@ -3,6 +3,7 @@
 #include "../rsx_utils.h"
 #include "simple_array.hpp"
 #include "TextureUtils.h"
+#include "framebuffer_feedback_types.h"
 
 namespace rsx
 {
@@ -44,13 +45,6 @@ namespace rsx
 		_3d_unwrap,               // One large texture provided to be partitioned into a 3D array
 		mipmap_gather,            // Provided list of sections to be reassembled as mipmap levels of the same texture
 		blit_image_static,        // Variant of the copy command that does scaling instead of copying
-	};
-
-	enum class framebuffer_feedback_copy_reason : u8
-	{
-		none,
-		live_rop,
-		edge_clamped_merge,
 	};
 
 	struct blit_op_result

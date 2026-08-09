@@ -9,6 +9,7 @@
 #include "util/v128.hpp"
 #include <util/bless.hpp>
 
+#include <array>
 #include <span>
 #include <unordered_map>
 
@@ -50,6 +51,36 @@ namespace program_hash_util
 
 	struct fragment_program_utils
 	{
+		enum class texture_opcode_class : u16
+		{
+			plain        = 1 << 0,
+			projected    = 1 << 1,
+			gradients    = 1 << 2,
+			bias         = 1 << 3,
+			explicit_lod = 1 << 4,
+			bump_env     = 1 << 5,
+		};
+
+		enum class texture_coordinate_source : u8
+		{
+			unknown     = 1 << 0,
+			wpos        = 1 << 1,
+			texcoord    = 1 << 2,
+			other_input = 1 << 3,
+			temporary   = 1 << 4,
+			constant    = 1 << 5,
+		};
+
+		struct texture_instruction_metadata
+		{
+			u16 opcode_class_mask;                // Feature mask; BEM variants set two bits but count as one instruction.
+			u16 instruction_count;                 // Saturates instead of wrapping on malformed, unterminated ucode.
+			u8 direct_coordinate_source_mask;      // Encoded SRC0 classes only; not dataflow or gl_FragCoord equivalence.
+			bool has_indexed_input;                 // SRC0 is an input selected through SRC2.use_index_reg.
+			bool has_mixed_coordinate_sources;      // This texture slot has more than one encoded SRC0 class.
+			bool has_non_identity_coordinate_expression; // SRC0 changes xy through swizzle, abs/neg or precision clamping.
+		};
+
 		struct fragment_program_metadata
 		{
 			u32 program_start_offset;
@@ -57,6 +88,7 @@ namespace program_hash_util
 			u32 program_constants_buffer_length;
 			u16 referenced_textures_mask;
 			u16 bx2_texture_reads_mask;
+			std::array<texture_instruction_metadata, 16> texture_instructions;
 
 			bool has_pack_instructions;
 			bool has_branch_instructions;

@@ -21,6 +21,8 @@ VK_FUNC(vkCmdEndConditionalRenderingEXT);
 VK_FUNC(vkSetDebugUtilsObjectNameEXT);
 VK_FUNC(vkQueueInsertDebugUtilsLabelEXT);
 VK_FUNC(vkCmdInsertDebugUtilsLabelEXT);
+VK_FUNC(vkCmdBeginDebugUtilsLabelEXT);
+VK_FUNC(vkCmdEndDebugUtilsLabelEXT);
 
 // KHR_synchronization2
 VK_FUNC(vkCmdSetEvent2KHR);

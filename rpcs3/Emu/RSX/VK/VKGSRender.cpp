@@ -2555,6 +2555,9 @@ void VKGSRender::close_and_submit_command_buffer(vk::fence* pFence, VkSemaphore 
 	}
 
 	m_current_command_buffer->submit(primary_submit_info, force_flush);
+	m_framebuffer_feedback_oracle.note_submit(
+		reinterpret_cast<uptr>(m_current_command_buffer),
+		m_current_command_buffer->reset_id);
 
 	m_queue_status.clear(flush_queue_state::flushing);
 }

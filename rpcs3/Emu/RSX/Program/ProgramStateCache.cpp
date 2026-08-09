@@ -5,6 +5,7 @@
 #include "Emu/RSX/Core/RSXDriverState.h"
 #include "util/sysinfo.hpp"
 
+#include <limits>
 #include <stack>
 
 #if defined(ARCH_X64)
@@ -582,6 +583,84 @@ bool fragment_program_utils::is_any_src_constant(v128 sourceOperand)
 	return (sourceOperand._u32[1] & 0x300) == 0x200 || (static_cast<u32>(masked) == 0x200 || static_cast<u32>(masked >> 32) == 0x200);
 }
 
+namespace
+{
+	constexpr u32 decode_fragment_program_word(u32 word)
+	{
+		return ((word & 0x00FF00FF) << 8) |
+			((word & 0xFF00FF00) >> 8);
+	}
+
+	constexpr u16 texture_opcode_class_mask(rsx::assembler::FP_opcode opcode)
+	{
+		using opcode_class = fragment_program_utils::texture_opcode_class;
+
+		switch (opcode)
+		{
+		case RSX_FP_OPCODE_TEX:
+			return static_cast<u16>(opcode_class::plain);
+		case RSX_FP_OPCODE_TXP:
+			return static_cast<u16>(opcode_class::projected);
+		case RSX_FP_OPCODE_TXD:
+			return static_cast<u16>(opcode_class::gradients);
+		case RSX_FP_OPCODE_TXB:
+			return static_cast<u16>(opcode_class::bias);
+		case RSX_FP_OPCODE_TXL:
+			return static_cast<u16>(opcode_class::explicit_lod);
+		case RSX_FP_OPCODE_TEXBEM:
+			return static_cast<u16>(opcode_class::plain) |
+				static_cast<u16>(opcode_class::bump_env);
+		case RSX_FP_OPCODE_TXPBEM:
+			return static_cast<u16>(opcode_class::projected) |
+				static_cast<u16>(opcode_class::bump_env);
+		default:
+			return 0;
+		}
+	}
+
+	constexpr u8 classify_texture_coordinate_source(
+		const OPDEST& dst,
+		const SRC0& src0,
+		const SRC2& src2,
+		bool& has_indexed_input)
+	{
+		using source = fragment_program_utils::texture_coordinate_source;
+
+		switch (src0.reg_type)
+		{
+		case RSX_FP_REGISTER_TYPE_INPUT:
+			if (src2.use_index_reg)
+			{
+				has_indexed_input = true;
+				return static_cast<u8>(source::unknown);
+			}
+
+			if (dst.src_attr_reg_num == 0)
+			{
+				return static_cast<u8>(source::wpos);
+			}
+
+			if (dst.src_attr_reg_num >= 4 && dst.src_attr_reg_num <= 13)
+			{
+				return static_cast<u8>(source::texcoord);
+			}
+
+			if (dst.src_attr_reg_num <= 14)
+			{
+				return static_cast<u8>(source::other_input);
+			}
+
+			return static_cast<u8>(source::unknown);
+		case RSX_FP_REGISTER_TYPE_TEMP:
+			return static_cast<u8>(source::temporary);
+		case RSX_FP_REGISTER_TYPE_CONSTANT:
+			return static_cast<u8>(source::constant);
+		default:
+			return static_cast<u8>(source::unknown);
+		}
+	}
+}
+
 usz fragment_program_utils::get_fragment_program_ucode_size(const void* ptr)
 {
 	const auto instBuffer = ptr;
@@ -650,9 +729,34 @@ fragment_program_utils::fragment_program_metadata fragment_program_utils::analys
 		case RSX_FP_OPCODE_TXD:
 		case RSX_FP_OPCODE_TXB:
 		case RSX_FP_OPCODE_TXL:
+		{
 			result.referenced_textures_mask |= (1 << d0.tex_num);
 			result.bx2_texture_reads_mask |= ((d0.exp_tex ? 1u : 0u) << d0.tex_num);
+
+			auto& texture = result.texture_instructions[d0.tex_num];
+			texture.opcode_class_mask |= texture_opcode_class_mask(opcode);
+			if (texture.instruction_count != std::numeric_limits<u16>::max())
+			{
+				texture.instruction_count++;
+			}
+
+			// FP input selection is split across the encoded SRC0 type, OPDEST attribute and SRC2 index flag.
+			// This deliberately records only that direct encoding. In particular, it does not trace temporaries
+			// or prove that the resulting texture coordinates equal the current fragment position.
+			const SRC0 src0{ .HEX = decode_fragment_program_word(inst._u32[1]) };
+			const SRC1 src1{ .HEX = decode_fragment_program_word(inst._u32[2]) };
+			const SRC2 src2{ .HEX = decode_fragment_program_word(inst._u32[3]) };
+			const u8 source = classify_texture_coordinate_source(d0, src0, src2, texture.has_indexed_input);
+			if (texture.direct_coordinate_source_mask && !(texture.direct_coordinate_source_mask & source))
+			{
+				texture.has_mixed_coordinate_sources = true;
+			}
+			texture.direct_coordinate_source_mask |= source;
+			texture.has_non_identity_coordinate_expression |=
+				src0.swizzle_x != 0 || src0.swizzle_y != 1 ||
+				src0.abs || src0.neg || src1.src0_prec_mod != RSX_FP_PRECISION_REAL;
 			break;
+		}
 		case RSX_FP_OPCODE_PK4:
 		case RSX_FP_OPCODE_UP4:
 		case RSX_FP_OPCODE_PK2:

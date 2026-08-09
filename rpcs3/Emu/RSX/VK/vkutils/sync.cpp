@@ -560,6 +560,37 @@ namespace vk
 		);
 	}
 
+	debug_label_scope::debug_label_scope(const vk::command_buffer& cmd, const char* text)
+	{
+		if (!_vkCmdBeginDebugUtilsLabelEXT || !_vkCmdEndDebugUtilsLabelEXT || !text || !cmd.is_recording())
+		{
+			return;
+		}
+
+		m_command_buffer = cmd;
+		const VkDebugUtilsLabelEXT label_info =
+		{
+			.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+			.pLabelName = text,
+		};
+
+		_vkCmdBeginDebugUtilsLabelEXT(m_command_buffer, &label_info);
+		m_active = true;
+	}
+
+	debug_label_scope::debug_label_scope(const vk::command_buffer& cmd, const std::string& text)
+		: debug_label_scope(cmd, text.c_str())
+	{
+	}
+
+	debug_label_scope::~debug_label_scope()
+	{
+		if (m_active)
+		{
+			_vkCmdEndDebugUtilsLabelEXT(m_command_buffer);
+		}
+	}
+
 	VkResult wait_for_fence(fence* pFence, u64 timeout)
 	{
 		pFence->wait_flush();

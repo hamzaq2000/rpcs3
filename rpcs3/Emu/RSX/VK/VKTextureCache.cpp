@@ -7,6 +7,56 @@
 
 #include "util/asm.hpp"
 
+#ifdef __APPLE__
+#include <os/signpost.h>
+#endif
+
+namespace
+{
+	class feedback_encode_signpost_scope
+	{
+#ifdef __APPLE__
+		os_log_t m_log = nullptr;
+		os_signpost_id_t m_id = OS_SIGNPOST_ID_INVALID;
+		u64 m_serial = 0;
+#endif
+
+	public:
+		explicit feedback_encode_signpost_scope(u64 serial)
+		{
+#ifdef __APPLE__
+			if (!serial)
+			{
+				return;
+			}
+
+			static os_log_t feedback_log = os_log_create("net.rpcs3.framebuffer-feedback", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+			m_log = feedback_log;
+			m_id = os_signpost_id_generate(m_log);
+			m_serial = serial;
+			os_signpost_interval_begin(m_log, m_id, "RPCS3FeedbackEncode",
+				"serial=%{public}llu", static_cast<unsigned long long>(m_serial));
+#else
+			(void)serial;
+#endif
+		}
+
+		~feedback_encode_signpost_scope()
+		{
+#ifdef __APPLE__
+			if (m_serial)
+			{
+				os_signpost_interval_end(m_log, m_id, "RPCS3FeedbackEncode",
+					"serial=%{public}llu", static_cast<unsigned long long>(m_serial));
+			}
+#endif
+		}
+
+		feedback_encode_signpost_scope(const feedback_encode_signpost_scope&) = delete;
+		feedback_encode_signpost_scope& operator=(const feedback_encode_signpost_scope&) = delete;
+	};
+}
+
 namespace vk
 {
 	u64 hash_image_properties(VkFormat format, u16 w, u16 h, u16 d, u16 mipmaps, VkImageType type, VkImageCreateFlags create_flags, VkSharingMode sharing_mode)
@@ -411,10 +461,22 @@ namespace vk
 		m_cached_memory_size = 0;
 	}
 
-	void texture_cache::copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst, const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const
+	void texture_cache::copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst,
+		const rsx::simple_array<copy_region_descriptor>& sections_to_transfer,
+		u64 feedback_copy_serial) const
 	{
 		const auto dst_aspect = dst->aspect();
 		const auto dst_bpp = vk::get_format_texel_width(dst->format());
+		const std::string feedback_label = feedback_copy_serial
+			? fmt::format("Framebuffer feedback copy serial={}", feedback_copy_serial)
+			: std::string{};
+		const char* feedback_label_text = feedback_label.empty() ? nullptr : feedback_label.c_str();
+		// One logical interval per feedback-copy serial. A typeless or scaled
+		// transfer can encode more than one Metal blit encoder; the trace parser
+		// attributes every encoder fully contained by this interval to the same
+		// logical copy.
+		feedback_encode_signpost_scope feedback_signpost(feedback_copy_serial);
+		vk::debug_label_scope feedback_debug_label(cmd, feedback_label_text);
 
 		std::unordered_set<decltype(sections_to_transfer.front().src)> processed_input_images;
 
@@ -697,7 +759,9 @@ namespace vk
 	}
 
 	vk::image_view* texture_cache::create_temporary_subresource_view_impl(vk::command_buffer& cmd, vk::image* source, VkImageType image_type, VkImageViewType view_type,
-		u32 gcm_format, u16 x, u16 y, u16 w, u16 h, u16 d, u8 mips, const rsx::texture_channel_remap_t& remap_vector, bool copy)
+		u32 gcm_format, u16 x, u16 y, u16 w, u16 h, u16 d, u8 mips,
+		const rsx::texture_channel_remap_t& remap_vector, bool copy,
+		u64 feedback_copy_serial)
 	{
 		const VkImageCreateFlags image_flags = (view_type == VK_IMAGE_VIEW_TYPE_CUBE) ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
 		const VkImageUsageFlags usage_flags = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -748,7 +812,7 @@ namespace vk
 			} };
 
 			vk::change_image_layout(cmd, image.get(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-			copy_transfer_regions_impl(cmd, image.get(), region);
+			copy_transfer_regions_impl(cmd, image.get(), region, feedback_copy_serial);
 			vk::change_image_layout(cmd, image.get(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 		}
 
@@ -760,7 +824,8 @@ namespace vk
 	vk::image_view* texture_cache::create_temporary_subresource_view(vk::command_buffer& cmd, const deferred_subresource& desc)
 	{
 		return create_temporary_subresource_view_impl(cmd, desc.external_handle, desc.external_handle->info.imageType, VK_IMAGE_VIEW_TYPE_2D,
-			desc.gcm_format, desc.x, desc.y, desc.width, desc.height, 1, 1, desc.remap, true);
+			desc.gcm_format, desc.x, desc.y, desc.width, desc.height, 1, 1, desc.remap, true,
+			desc.feedback_oracle_copy_serial);
 	}
 
 	vk::image_view* texture_cache::generate_cubemap_from_images(vk::command_buffer& cmd, const deferred_subresource& desc)
@@ -806,7 +871,7 @@ namespace vk
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 			dst_range);
 
-		copy_transfer_regions_impl(cmd, image, sections_to_copy);
+		copy_transfer_regions_impl(cmd, image, sections_to_copy, desc.feedback_oracle_copy_serial);
 
 		vk::change_image_layout(cmd, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, dst_range);
 		return result;
@@ -854,7 +919,7 @@ namespace vk
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 			dst_range);
 
-		copy_transfer_regions_impl(cmd, image, sections_to_copy);
+		copy_transfer_regions_impl(cmd, image, sections_to_copy, desc.feedback_oracle_copy_serial);
 
 		vk::change_image_layout(cmd, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, dst_range);
 		return result;
@@ -905,7 +970,7 @@ namespace vk
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 			dst_range);
 
-		copy_transfer_regions_impl(cmd, image, sections_to_copy);
+		copy_transfer_regions_impl(cmd, image, sections_to_copy, desc.feedback_oracle_copy_serial);
 
 		vk::change_image_layout(cmd, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, dst_range);
 		return result;
@@ -954,7 +1019,7 @@ namespace vk
 			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 			dst_range);
 
-		copy_transfer_regions_impl(cmd, image, sections_to_copy);
+		copy_transfer_regions_impl(cmd, image, sections_to_copy, desc.feedback_oracle_copy_serial);
 
 		vk::change_image_layout(cmd, image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, dst_range);
 		return result;
@@ -994,7 +1059,7 @@ namespace vk
 
 		auto dst = dst_view->image();
 		dst->push_layout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		copy_transfer_regions_impl(cmd, dst, region);
+		copy_transfer_regions_impl(cmd, dst, region, desc.feedback_oracle_copy_serial);
 		dst->pop_layout(cmd);
 	}
 

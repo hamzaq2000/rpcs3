@@ -186,6 +186,29 @@ void VKGSRender::advance_queued_frames()
 	// m_rtts storage is double buffered and should be safe to tag on frame boundary
 	m_rtts.trim(*m_current_command_buffer, vk::vmm_determine_memory_load_severity());
 
+	const bool feedback_oracle_enabled = rsx::framebuffer_feedback_oracle_enabled(
+		static_cast<bool>(g_cfg.video.debug_overlay));
+	m_framebuffer_feedback_oracle.set_enabled(feedback_oracle_enabled);
+	if (feedback_oracle_enabled)
+	{
+		const auto feedback = m_texture_cache.get_framebuffer_feedback_copy_statistics();
+		m_framebuffer_feedback_oracle.end_frame(
+		{
+			.requests = feedback.requests,
+			.live_rop_requests = feedback.live_rop_requests,
+			.edge_clamped_requests = feedback.edge_clamped_requests,
+			.actual_copies = feedback.actual_copies,
+			.new_snapshots = feedback.new_snapshots,
+			.refreshes = feedback.cache_refreshes,
+			.generation_reuses = feedback.generation_reuses,
+			.static_hits = feedback.static_cache_hits,
+			.failures = feedback.failures,
+			.uncached_copies = feedback.uncached_copies,
+			.logical_copied_bytes = feedback.logical_copied_bytes,
+			.logical_reused_bytes = feedback.logical_reused_bytes,
+		});
+	}
+
 	// Texture cache is also double buffered to prevent use-after-free
 	m_texture_cache.on_frame_end();
 	m_samplers_dirty.store(true);
@@ -913,6 +936,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 			const auto texture_upload_miss_ratio = m_texture_cache.get_texture_upload_miss_percentage();
 			const auto texture_copies_ellided = m_texture_cache.get_texture_copies_ellided_this_frame();
 			const auto feedback_copies = m_texture_cache.get_framebuffer_feedback_copy_statistics();
+			const auto feedback_oracle = m_framebuffer_feedback_oracle.get_summary();
 			const auto vertex_cache_hit_count = (info.stats.vertex_cache_request_count - info.stats.vertex_cache_miss_count);
 			const auto vertex_cache_hit_ratio = info.stats.vertex_cache_request_count
 				? (vertex_cache_hit_count * 100) / info.stats.vertex_cache_request_count
@@ -939,6 +963,7 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 				"Flush requests: %13d  = %2d (%3d%%) hard faults, %2d unavoidable, %2d misprediction(s), %2d speculation(s)\n"
 				"Texture uploads: %12u (%u from CPU - %02u%%, %u copies avoided)\n"
 				"Feedback copies: %11u req (%u live, %u edge), %u copies (%u new, %u refresh, %u uncached), %u generation reuse, %u static hits; %llu/%llu KiB logical copy/reuse\n"
+				"Feedback oracle: %11llu req, %llu consumer links, local/ping %llu/%llu KiB actual, %llu/%llu req/map drops\n"
 				"Vertex cache hits: %10u/%u (%u%%)\n"
 				"Program cache lookup ellision: %u/%u (%u%%)",
 				info.stats.framebuffer_stats.to_string(resolution_scaling_config, !backend_config.supports_hw_msaa),
@@ -952,6 +977,10 @@ void VKGSRender::flip(const rsx::display_flip_info_t& info)
 				feedback_copies.uncached_copies, feedback_copies.generation_reuses,
 				feedback_copies.static_cache_hits,
 				feedback_copies.logical_copied_bytes / 1024, feedback_copies.logical_reused_bytes / 1024,
+				feedback_oracle.frame.requests, feedback_oracle.frame.consumer_links,
+				feedback_oracle.frame_routes.local_read.actual_copy_bytes / 1024,
+				feedback_oracle.frame_routes.ping_pong.actual_copy_bytes / 1024,
+				feedback_oracle.frame.request_record_drops, feedback_oracle.frame.copy_map_drops,
 				vertex_cache_hit_count, info.stats.vertex_cache_request_count, vertex_cache_hit_ratio,
 				program_cache_ellided, program_cache_lookups, program_cache_ellision_rate)
 			);

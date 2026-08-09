@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "instance.h"
+#include "Emu/RSX/Common/framebuffer_feedback_types.h"
 
 namespace vk
 {
@@ -147,7 +148,9 @@ namespace vk
 				extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
 			}
 
-			if (g_cfg.video.renderdoc_compatiblity && support.is_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
+			if ((g_cfg.video.renderdoc_compatiblity ||
+				rsx::framebuffer_feedback_oracle_enabled(static_cast<bool>(g_cfg.video.debug_overlay))) &&
+				support.is_supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
 			{
 				extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 			}

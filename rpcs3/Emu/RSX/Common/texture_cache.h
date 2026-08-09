@@ -160,6 +160,15 @@ namespace rsx
 			framebuffer_feedback_copy_reason feedback_copy_reason = framebuffer_feedback_copy_reason::none;
 			const surface_content_tracker* source_content_tracker = nullptr;
 			u64 copied_content_generation = 0;
+
+			// Explicitly enabled, debug-overlay-only copy-to-consumer attribution.
+			// Values are populated by create_temporary_subresource and never
+			// participate in cache matching or rendering decisions.
+			framebuffer_feedback_oracle_outcome feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::none;
+			u64 feedback_oracle_request_serial = 0;
+			u64 feedback_oracle_snapshot_serial = 0;
+			u64 feedback_oracle_copy_serial = 0;
+			u64 feedback_oracle_source_generation = 0;
 			u32 external_ref_addr = 0;
 			u16 x = 0;
 			u16 y = 0;
@@ -575,6 +584,9 @@ namespace rsx
 
 		std::array<framebuffer_feedback_copy_signature_entry, m_feedback_copy_signature_capacity> m_feedback_copy_signatures{};
 		u64 m_feedback_copy_signature_last_report_time_us = 0;
+		u64 m_feedback_oracle_next_request_serial = 0;
+		u64 m_feedback_oracle_next_snapshot_serial = 0;
+		u64 m_feedback_oracle_next_copy_serial = 0;
 
 		struct framebuffer_feedback_cross_frame_key
 		{
@@ -2816,7 +2828,8 @@ namespace rsx
 		{
 			const bool is_feedback_copy = desc.feedback_copy_reason != framebuffer_feedback_copy_reason::none;
 			const bool is_dynamic_copy = desc.op == deferred_request_command::copy_image_dynamic;
-			const bool is_feedback_profile_enabled = is_feedback_copy && g_cfg.video.debug_overlay;
+			const bool is_feedback_profile_enabled = is_feedback_copy &&
+				framebuffer_feedback_oracle_enabled(static_cast<bool>(g_cfg.video.debug_overlay));
 			const bool is_partial_refresh_profile_enabled = g_cfg.video.debug_overlay &&
 				is_partial_refresh_oracle_candidate(desc);
 			if (is_partial_refresh_profile_enabled)
@@ -2829,6 +2842,17 @@ namespace rsx
 				(is_dynamic_copy || is_feedback_profile_enabled)
 				? desc.source_content_tracker->get_content_generation()
 				: 0;
+
+			if (is_feedback_profile_enabled)
+			{
+				// Enabled requests overwrite all prior attribution, including an OOM
+				// retry. The disabled path does not touch diagnostic metadata.
+				desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::none;
+				desc.feedback_oracle_request_serial = ++m_feedback_oracle_next_request_serial;
+				desc.feedback_oracle_snapshot_serial = 0;
+				desc.feedback_oracle_copy_serial = 0;
+				desc.feedback_oracle_source_generation = source_content_generation;
+			}
 
 			if (is_feedback_copy)
 			{
@@ -2862,6 +2886,20 @@ namespace rsx
 						found_desc.remap.encoded != desc.remap.encoded)
 						continue;
 
+					if (is_feedback_profile_enabled)
+					{
+						if (!found_desc.feedback_oracle_snapshot_serial)
+						{
+							// The overlay may have been enabled after this frame-local
+							// snapshot was created. Give the existing object an identity
+							// without pretending that another copy occurred.
+							found_desc.feedback_oracle_snapshot_serial = ++m_feedback_oracle_next_snapshot_serial;
+						}
+
+						desc.feedback_oracle_snapshot_serial = found_desc.feedback_oracle_snapshot_serial;
+						desc.feedback_oracle_copy_serial = found_desc.feedback_oracle_copy_serial;
+					}
+
 					if (is_dynamic_copy)
 					{
 						if (is_feedback_copy && source_content_generation &&
@@ -2869,6 +2907,10 @@ namespace rsx
 						{
 							m_feedback_copy_stats.generation_reuses++;
 							m_feedback_copy_stats.logical_reused_bytes += logical_copy_bytes;
+							if (is_feedback_profile_enabled)
+							{
+								desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::generation_reuse;
+							}
 						}
 						else
 						{
@@ -2876,6 +2918,14 @@ namespace rsx
 							{
 								record_partial_refresh_oracle(desc, found_desc.copied_content_generation,
 									source_content_generation, logical_copy_bytes);
+							}
+
+							if (is_feedback_profile_enabled)
+							{
+								desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::refresh;
+								desc.feedback_oracle_copy_serial = ++m_feedback_oracle_next_copy_serial;
+								found_desc.feedback_oracle_copy_serial = desc.feedback_oracle_copy_serial;
+								found_desc.feedback_oracle_source_generation = source_content_generation;
 							}
 
 							update_image_contents(cmd, It->second.second, desc);
@@ -2893,6 +2943,10 @@ namespace rsx
 					else if (is_feedback_copy)
 					{
 						m_feedback_copy_stats.static_cache_hits++;
+						if (is_feedback_profile_enabled)
+						{
+							desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::static_hit;
+						}
 					}
 
 					return It->second.second;
@@ -2902,6 +2956,16 @@ namespace rsx
 			// A production cross-frame cache could only be consulted once the ordinary
 			// current-frame cache misses. This debug oracle follows the same ordering.
 			probe_previous_frame_feedback_copy(desc, source_content_generation);
+
+			// Allocate diagnostic identities before the backend encodes the new copy so
+			// a command-buffer label can name the exact operation. Failed provisioning
+			// simply burns the monotonic IDs; they are never renderer-visible handles.
+			if (is_feedback_profile_enabled)
+			{
+				desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::new_snapshot;
+				desc.feedback_oracle_snapshot_serial = ++m_feedback_oracle_next_snapshot_serial;
+				desc.feedback_oracle_copy_serial = ++m_feedback_oracle_next_copy_serial;
+			}
 
 			std::lock_guard lock(m_cache_mutex);
 			image_view_type result = 0;
@@ -3038,6 +3102,12 @@ namespace rsx
 			else if (is_feedback_copy)
 			{
 				m_feedback_copy_stats.failures++;
+				if (is_feedback_profile_enabled)
+				{
+					desc.feedback_oracle_outcome = framebuffer_feedback_oracle_outcome::failure;
+					desc.feedback_oracle_snapshot_serial = 0;
+					desc.feedback_oracle_copy_serial = 0;
+				}
 			}
 
 			return result;

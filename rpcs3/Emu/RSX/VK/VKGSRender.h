@@ -16,6 +16,7 @@
 #include "VKOverlays.h"
 #include "VKProgramBuffer.h"
 #include "VKFramebuffer.h"
+#include "VKFramebufferFeedbackOracle.h"
 #include "VKShaderInterpreter.h"
 #include "VKQueryPool.h"
 
@@ -62,6 +63,7 @@ private:
 
 	vk::texture_cache m_texture_cache;
 	vk::surface_cache m_rtts;
+	vk::framebuffer_feedback::oracle m_framebuffer_feedback_oracle;
 
 	std::unique_ptr<vk::buffer> null_buffer;
 	std::unique_ptr<vk::buffer_view> null_buffer_view;
@@ -250,6 +252,11 @@ private:
 	void load_texture_env();
 	bool bind_texture_env();
 	bool bind_interpreter_texture_env();
+	void begin_framebuffer_feedback_oracle_draw();
+	void record_framebuffer_feedback_request(
+		const vk::texture_cache::sampled_image_descriptor& sampler_state,
+		vk::image_view* view, const vk::sampler* sampler, u32 texture_unit,
+		vk::framebuffer_feedback::texture_stage stage);
 
 public:
 	void init_buffers(rsx::framebuffer_creation_context context, bool skip_reading = false);

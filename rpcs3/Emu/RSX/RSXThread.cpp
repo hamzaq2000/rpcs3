@@ -56,6 +56,20 @@ LOG_CHANNEL(perf_log, "PERF");
 
 namespace
 {
+	bool cell_coherence_oracle_requested()
+	{
+		// The Cell-coherence experiment is intentionally opt-in now that its
+		// economic gate is closed. Keeping it tied to the ordinary debug overlay
+		// would make unrelated renderer profiling pay for its hot MFC/fault rings.
+		static const bool requested = []
+		{
+			const char* value = std::getenv("RPCS3_CELL_COHERENCE_ORACLE");
+			return value && value[0] && value[0] != '0';
+		}();
+
+		return requested && g_cfg.video.debug_overlay;
+	}
+
 	struct cellfault_signature
 	{
 		rsx::coherence_stats::fault_event exemplar{};
@@ -946,7 +960,7 @@ namespace rsx
 		spu_mfc_slack::reset();
 		cell_access::g_ownership_directory.reset_validation();
 		cell_access::g_exact_cohort_oracle.reset();
-		coherence_stats::set_enabled(!!g_cfg.video.debug_overlay);
+		coherence_stats::set_enabled(cell_coherence_oracle_requested());
 
 		g_access_violation_handler = [this](u32 address, bool is_writing, const access_violation_info& info)
 		{
@@ -3523,7 +3537,7 @@ namespace rsx
 	void thread::on_frame_end(u32 buffer, bool forced)
 	{
 		coherence_stats::advance_fault_frame();
-		const bool cellstat_enabled = !!g_cfg.video.debug_overlay;
+		const bool cellstat_enabled = cell_coherence_oracle_requested();
 		coherence_stats::set_enabled(cellstat_enabled);
 
 		bool pause_emulator = false;

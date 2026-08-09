@@ -194,6 +194,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_rsx_cfg.cpp
             tests/test_rsx_coherence_stats.cpp
             tests/test_rsx_fp_asm.cpp
+            tests/test_rsx_program_metadata.cpp
             tests/test_dmux_pamf.cpp
             tests/test_spu_analyser.cpp
             tests/test_spu_llvm_compile_claim.cpp
@@ -201,6 +202,10 @@ if(BUILD_RPCS3_TESTS)
             tests/test_types_util.cpp
             tests/test_vm_native.cpp
     )
+
+    if(TARGET 3rdparty_vulkan)
+        target_sources(rpcs3_test PRIVATE tests/test_vk_framebuffer_feedback_oracle.cpp)
+    endif()
 
     target_link_libraries(rpcs3_test
         PRIVATE

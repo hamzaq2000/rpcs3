@@ -518,7 +518,9 @@ namespace vk
 
 		VkComponentMapping apply_component_mapping_flags(u32 gcm_format, rsx::component_order flags, const rsx::texture_channel_remap_t& remap_vector) const;
 
-		void copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst, const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const;
+		void copy_transfer_regions_impl(vk::command_buffer& cmd, vk::image* dst,
+			const rsx::simple_array<copy_region_descriptor>& sections_to_transfer,
+			u64 feedback_copy_serial = 0) const;
 
 		vk::image* get_template_from_collection_impl(const rsx::simple_array<copy_region_descriptor>& sections_to_transfer) const;
 
@@ -526,7 +528,9 @@ namespace vk
 
 	protected:
 		vk::image_view* create_temporary_subresource_view_impl(vk::command_buffer& cmd, vk::image* source, VkImageType image_type, VkImageViewType view_type,
-			u32 gcm_format, u16 x, u16 y, u16 w, u16 h, u16 d, u8 mips, const rsx::texture_channel_remap_t& remap_vector, bool copy);
+			u32 gcm_format, u16 x, u16 y, u16 w, u16 h, u16 d, u8 mips,
+			const rsx::texture_channel_remap_t& remap_vector, bool copy,
+			u64 feedback_copy_serial = 0);
 
 		vk::image_view* create_temporary_subresource_view(vk::command_buffer& cmd, const deferred_subresource& desc) override;
 

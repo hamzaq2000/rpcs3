@@ -120,6 +120,405 @@ namespace vk
 	}
 }
 
+namespace
+{
+	constexpr u64 feedback_hash_append(u64 hash, u64 value) noexcept
+	{
+		for (u32 index = 0; index < 8; ++index)
+		{
+			hash ^= static_cast<u8>(value >> (index * 8));
+			hash *= 1099511628211ull;
+		}
+		return hash;
+	}
+
+	u64 get_feedback_sampler_signature(const vk::sampler* sampler) noexcept
+	{
+		if (!sampler)
+		{
+			return 0;
+		}
+
+		const auto& info = sampler->info;
+		u64 hash = 14695981039346656037ull;
+		hash = feedback_hash_append(hash, info.magFilter);
+		hash = feedback_hash_append(hash, info.minFilter);
+		hash = feedback_hash_append(hash, info.mipmapMode);
+		hash = feedback_hash_append(hash, info.addressModeU);
+		hash = feedback_hash_append(hash, info.addressModeV);
+		hash = feedback_hash_append(hash, info.addressModeW);
+		hash = feedback_hash_append(hash, std::bit_cast<u32>(info.mipLodBias));
+		hash = feedback_hash_append(hash, info.anisotropyEnable);
+		hash = feedback_hash_append(hash, std::bit_cast<u32>(info.maxAnisotropy));
+		hash = feedback_hash_append(hash, info.compareEnable);
+		hash = feedback_hash_append(hash, info.compareOp);
+		hash = feedback_hash_append(hash, std::bit_cast<u32>(info.minLod));
+		hash = feedback_hash_append(hash, std::bit_cast<u32>(info.maxLod));
+		hash = feedback_hash_append(hash, info.borderColor);
+		return feedback_hash_append(hash, info.unnormalizedCoordinates);
+	}
+
+	u32 pack_feedback_component_map(const VkComponentMapping& map) noexcept
+	{
+		return static_cast<u32>(map.r) |
+			(static_cast<u32>(map.g) << 4) |
+			(static_cast<u32>(map.b) << 8) |
+			(static_cast<u32>(map.a) << 12);
+	}
+
+	bool feedback_blend_factor_reads_destination(VkBlendFactor factor) noexcept
+	{
+		switch (factor)
+		{
+		case VK_BLEND_FACTOR_DST_COLOR:
+		case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR:
+		case VK_BLEND_FACTOR_DST_ALPHA:
+		case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+		case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	bool feedback_blend_is_destination_independent(const VkPipelineColorBlendAttachmentState& state) noexcept
+	{
+		if (!state.blendEnable)
+		{
+			return true;
+		}
+
+		return state.dstColorBlendFactor == VK_BLEND_FACTOR_ZERO &&
+			state.dstAlphaBlendFactor == VK_BLEND_FACTOR_ZERO &&
+			!feedback_blend_factor_reads_destination(state.srcColorBlendFactor) &&
+			!feedback_blend_factor_reads_destination(state.srcAlphaBlendFactor) &&
+			state.colorBlendOp != VK_BLEND_OP_MIN && state.colorBlendOp != VK_BLEND_OP_MAX &&
+			state.alphaBlendOp != VK_BLEND_OP_MIN && state.alphaBlendOp != VK_BLEND_OP_MAX;
+	}
+
+	bool feedback_logic_op_is_destination_independent(VkLogicOp op) noexcept
+	{
+		return op == VK_LOGIC_OP_CLEAR || op == VK_LOGIC_OP_COPY ||
+			op == VK_LOGIC_OP_COPY_INVERTED || op == VK_LOGIC_OP_SET;
+	}
+}
+
+void VKGSRender::begin_framebuffer_feedback_oracle_draw()
+{
+	const bool enabled = rsx::framebuffer_feedback_oracle_enabled(
+		static_cast<bool>(g_cfg.video.debug_overlay));
+	m_framebuffer_feedback_oracle.set_enabled(enabled);
+	if (!enabled)
+	{
+		return;
+	}
+
+	const auto& state = m_pipeline_properties.state;
+	u64 reject_bits = vk::framebuffer_feedback::reject_unknown_coverage;
+	if (current_fragment_program.ctrl & RSX_SHADER_CONTROL_META_USES_DISCARD)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_fragment_discard;
+	}
+	if (current_fragment_program.ctrl & CELL_GCM_SHADER_CONTROL_DEPTH_EXPORT)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_fragment_depth_export;
+	}
+	if (cond_render_ctrl.hw_cond_active)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_conditional_render;
+	}
+	if (state.ds.depthTestEnable || state.ds.depthBoundsTestEnable)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_depth_test;
+	}
+	if (state.ds.stencilTestEnable)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_stencil_test;
+	}
+	const u32 raster_samples = static_cast<u32>(state.ms.rasterizationSamples);
+	const u32 relevant_sample_mask = raster_samples >= 32 ? umax : ((1u << raster_samples) - 1);
+	if (state.ms.alphaToCoverageEnable || state.ms.alphaToOneEnable ||
+		(state.temp_storage.msaa_sample_mask & relevant_sample_mask) != relevant_sample_mask)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_a2c_or_sample_mask;
+	}
+	if (state.ms.rasterizationSamples != VK_SAMPLE_COUNT_1_BIT)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_multisample_target;
+	}
+
+	const u32 target_width = m_draw_fbo ? m_draw_fbo->width() : 0;
+	const u32 target_height = m_draw_fbo ? m_draw_fbo->height() : 0;
+	const s64 scissor_right = static_cast<s64>(m_scissor.offset.x) + m_scissor.extent.width;
+	const s64 scissor_bottom = static_cast<s64>(m_scissor.offset.y) + m_scissor.extent.height;
+	if (m_scissor.offset.x > 0 || m_scissor.offset.y > 0 ||
+		scissor_right < target_width || scissor_bottom < target_height)
+	{
+		reject_bits |= vk::framebuffer_feedback::reject_known_partial_coverage;
+	}
+
+	m_framebuffer_feedback_oracle.begin_draw(
+	{
+		.frame_id = vk::get_current_frame_id(),
+		.draw_id = m_frame_stats.draw_calls,
+		.fp_hash = m_prog_buffer->get_hash(current_fragment_program),
+		.vp_hash = m_prog_buffer->get_hash(current_vertex_program),
+		.pipeline_hash = m_prog_buffer->get_hash(m_pipeline_properties),
+		.renderpass_key = m_current_renderpass_key,
+		.command_buffer_identity = reinterpret_cast<uptr>(m_current_command_buffer),
+		.command_buffer_reset_id = m_current_command_buffer->reset_id,
+		.fragment_control = current_fragment_program.ctrl,
+		.pipeline_reject_bits = reject_bits,
+		.scissor_x = m_scissor.offset.x,
+		.scissor_y = m_scissor.offset.y,
+		.scissor_width = m_scissor.extent.width,
+		.scissor_height = m_scissor.extent.height,
+		.target_width = target_width,
+		.target_height = target_height,
+	});
+}
+
+void VKGSRender::record_framebuffer_feedback_request(
+	const vk::texture_cache::sampled_image_descriptor& sampler_state,
+	vk::image_view* view, const vk::sampler* sampler, u32 texture_unit,
+	vk::framebuffer_feedback::texture_stage stage)
+{
+	if (!m_framebuffer_feedback_oracle.enabled())
+	{
+		return;
+	}
+
+	const auto& desc = sampler_state.external_subresource_desc;
+	if (desc.feedback_copy_reason == rsx::framebuffer_feedback_copy_reason::none)
+	{
+		return;
+	}
+
+	u8 source_attachment = 0xff;
+	for (u8 index = 0; index < m_rtts.m_bound_render_targets.size(); ++index)
+	{
+		if (const auto surface = std::get<1>(m_rtts.m_bound_render_targets[index]);
+			surface && desc.source_content_tracker == surface)
+		{
+			source_attachment = index;
+			break;
+		}
+	}
+	if (source_attachment == 0xff)
+	{
+		if (const auto surface = std::get<1>(m_rtts.m_bound_depth_stencil);
+			surface && desc.source_content_tracker == surface)
+		{
+			source_attachment = 4;
+		}
+	}
+
+	const auto* source = desc.external_handle;
+	const auto* sampled_image = view ? view->image() : nullptr;
+	const auto* texture_metadata = stage == vk::framebuffer_feedback::texture_stage::fragment
+		? &current_fp_metadata.texture_instructions[texture_unit] : nullptr;
+	const u16 opcode_mask = texture_metadata ? texture_metadata->opcode_class_mask : 0;
+	const u16 instruction_count = texture_metadata ? texture_metadata->instruction_count : 0;
+	const u8 coordinate_source_mask = texture_metadata ? texture_metadata->direct_coordinate_source_mask : 0;
+
+	using fp_utils = program_hash_util::fragment_program_utils;
+	const u16 plain_opcode = static_cast<u16>(fp_utils::texture_opcode_class::plain);
+	const u16 bem_or_projection = static_cast<u16>(fp_utils::texture_opcode_class::bump_env) |
+		static_cast<u16>(fp_utils::texture_opcode_class::projected);
+	const u16 bias_gradient_or_lod = static_cast<u16>(fp_utils::texture_opcode_class::bias) |
+		static_cast<u16>(fp_utils::texture_opcode_class::gradients) |
+		static_cast<u16>(fp_utils::texture_opcode_class::explicit_lod);
+	const u8 wpos_source = static_cast<u8>(fp_utils::texture_coordinate_source::wpos);
+
+	const auto* sampler_info = sampler ? &sampler->info : nullptr;
+	const auto& texcoord_xform = sampler_state.texcoord_xform;
+	u64 texcoord_xform_signature = 14695981039346656037ull;
+	for (const f32 value : texcoord_xform.scale)
+	{
+		texcoord_xform_signature = feedback_hash_append(texcoord_xform_signature, std::bit_cast<u32>(value));
+	}
+	for (const f32 value : texcoord_xform.bias)
+	{
+		texcoord_xform_signature = feedback_hash_append(texcoord_xform_signature, std::bit_cast<u32>(value));
+	}
+	for (const f32 value : texcoord_xform.clamp_min)
+	{
+		texcoord_xform_signature = feedback_hash_append(texcoord_xform_signature, std::bit_cast<u32>(value));
+	}
+	for (const f32 value : texcoord_xform.clamp_max)
+	{
+		texcoord_xform_signature = feedback_hash_append(texcoord_xform_signature, std::bit_cast<u32>(value));
+	}
+	texcoord_xform_signature = feedback_hash_append(texcoord_xform_signature, texcoord_xform.clamp);
+	const bool is_fragment = stage == vk::framebuffer_feedback::texture_stage::fragment;
+	const bool is_single_2d = sampler_state.image_type == rsx::texture_dimension_extended::texture_dimension_2d &&
+		desc.mipmaps == 1 && desc.depth == 1 && sampler_state.samples == 1 &&
+		(!source || (source->layers() == 1 && source->samples() == 1));
+	const bool exact_region = source && !desc.x && !desc.y && desc.depth == 1 &&
+		desc.width == source->width() && desc.height == source->height();
+	const bool exact_format = source && view && source->format() == view->format();
+	const u32 source_component_map = source ? pack_feedback_component_map(source->native_component_map) : 0;
+	const u32 view_component_map = view ? pack_feedback_component_map(view->info.components) : 0;
+	const bool exact_remap = desc.remap.encoded == rsx::default_remap_vector.encoded &&
+		source && view && source_component_map == view_component_map;
+	const bool nearest_filter = sampler_info && sampler_info->minFilter == VK_FILTER_NEAREST &&
+		sampler_info->magFilter == VK_FILTER_NEAREST && sampler_info->mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	const bool clamp_addressing = sampler_info && sampler_info->addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+		sampler_info->addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
+		sampler_info->addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	const bool no_anisotropy = sampler_info && (!sampler_info->anisotropyEnable || sampler_info->maxAnisotropy <= 1.f);
+	const bool no_compare = sampler_info && !sampler_info->compareEnable;
+	const bool no_explicit_lod = sampler_info && sampler_info->mipLodBias == 0.f &&
+		sampler_info->minLod == 0.f && sampler_info->maxLod == 0.f;
+	const auto shader_window_origin = rsx::method_registers.shader_window_origin();
+	const auto pixel_center = rsx::method_registers.pixel_center();
+	const u16 shader_window_height = rsx::method_registers.shader_window_height();
+	const f32 effective_resolution_scale = shader_window_height <= resolution_scaling_config.min_scalable_dimension
+		? 1.f : resolution_scaling_config.scale_factor();
+	const f32 wpos_scale = shader_window_origin == rsx::window_origin::top
+		? (1.f / effective_resolution_scale) : (-1.f / effective_resolution_scale);
+	const f32 wpos_bias_x = pixel_center == rsx::window_pixel_center::integer ? -0.5f : 0.f;
+	const f32 wpos_bias_y = (shader_window_origin == rsx::window_origin::top ? 0.f : shader_window_height) +
+		(pixel_center == rsx::window_pixel_center::integer ? -0.5f : 0.f);
+	const auto approximately_equal = [](f32 lhs, f32 rhs)
+	{
+		return std::abs(lhs - rhs) <= std::numeric_limits<f32>::epsilon() *
+			std::max({ 1.f, std::abs(lhs), std::abs(rhs) }) * 4.f;
+	};
+	const bool common_coordinate_transform = sampler_info && sampled_image &&
+		shader_window_origin == rsx::window_origin::top &&
+		pixel_center == rsx::window_pixel_center::half &&
+		texcoord_xform.bias[0] == 0.f && texcoord_xform.bias[1] == 0.f && !texcoord_xform.clamp;
+	const bool normalized_coordinate_transform = common_coordinate_transform && !sampler_info->unnormalizedCoordinates &&
+		approximately_equal(texcoord_xform.scale[0], effective_resolution_scale / sampled_image->width()) &&
+		approximately_equal(texcoord_xform.scale[1], effective_resolution_scale / sampled_image->height());
+	const bool unnormalized_coordinate_transform = common_coordinate_transform && sampler_info->unnormalizedCoordinates &&
+		approximately_equal(texcoord_xform.scale[0], effective_resolution_scale) &&
+		approximately_equal(texcoord_xform.scale[1], effective_resolution_scale);
+	const bool compatible_coordinate_transform = normalized_coordinate_transform || unnormalized_coordinate_transform;
+	const bool coordinate_expression_known_identity = texture_metadata && instruction_count == 1 &&
+		!texture_metadata->has_non_identity_coordinate_expression;
+
+	u64 semantic_reject_bits = vk::framebuffer_feedback::reject_unknown_coordinates |
+		vk::framebuffer_feedback::reject_texture_offset_unknown |
+		vk::framebuffer_feedback::reject_same_draw_overlap_unknown;
+	if (!is_fragment) semantic_reject_bits |= vk::framebuffer_feedback::reject_non_fragment_stage;
+	if (opcode_mask != plain_opcode) semantic_reject_bits |= vk::framebuffer_feedback::reject_texture_opcode;
+	if (instruction_count != 1) semantic_reject_bits |= vk::framebuffer_feedback::reject_texture_instruction_count;
+	if (coordinate_source_mask != wpos_source) semantic_reject_bits |= vk::framebuffer_feedback::reject_coordinate_source;
+	if (!coordinate_expression_known_identity)
+		semantic_reject_bits |= vk::framebuffer_feedback::reject_coordinate_expression_unknown;
+	if (!compatible_coordinate_transform) semantic_reject_bits |= vk::framebuffer_feedback::reject_coordinate_transform_mismatch;
+	if (!texture_metadata || texture_metadata->has_indexed_input || texture_metadata->has_mixed_coordinate_sources)
+		semantic_reject_bits |= vk::framebuffer_feedback::reject_indexed_or_mixed_source;
+	if (!is_single_2d) semantic_reject_bits |= vk::framebuffer_feedback::reject_texture_subresource;
+	if (!exact_region) semantic_reject_bits |= vk::framebuffer_feedback::reject_inexact_region;
+	if (!exact_format) semantic_reject_bits |= vk::framebuffer_feedback::reject_inexact_format;
+	if (!exact_remap) semantic_reject_bits |= vk::framebuffer_feedback::reject_inexact_remap;
+	if (!no_compare) semantic_reject_bits |= vk::framebuffer_feedback::reject_texture_compare;
+	if (opcode_mask & bem_or_projection) semantic_reject_bits |= vk::framebuffer_feedback::reject_bem_or_projection;
+	if ((opcode_mask & bias_gradient_or_lod) || !no_explicit_lod)
+		semantic_reject_bits |= vk::framebuffer_feedback::reject_bias_gradient_or_lod;
+	if (!nearest_filter) semantic_reject_bits |= vk::framebuffer_feedback::reject_non_nearest_filter;
+	if (!clamp_addressing) semantic_reject_bits |= vk::framebuffer_feedback::reject_non_clamp_address;
+	if (!no_anisotropy) semantic_reject_bits |= vk::framebuffer_feedback::reject_anisotropy;
+	if (source_attachment == 0xff) semantic_reject_bits |= vk::framebuffer_feedback::reject_unknown_source_attachment;
+	if (desc.feedback_copy_reason != rsx::framebuffer_feedback_copy_reason::live_rop)
+		semantic_reject_bits |= vk::framebuffer_feedback::reject_non_live_rop_reason;
+	if (source && source->samples() != 1) semantic_reject_bits |= vk::framebuffer_feedback::reject_multisample_target;
+
+	if (source_attachment < 4)
+	{
+		const auto& attachment = m_pipeline_properties.state.att_state[source_attachment];
+		const bool destination_independent = m_pipeline_properties.state.cs.logicOpEnable
+			? feedback_logic_op_is_destination_independent(m_pipeline_properties.state.cs.logicOp)
+			: feedback_blend_is_destination_independent(attachment);
+		if (!destination_independent)
+		{
+			semantic_reject_bits |= vk::framebuffer_feedback::reject_destination_dependent_write;
+		}
+		if (!m_framebuffer_layout.color_write_enabled[source_attachment] ||
+			attachment.colorWriteMask != (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+				VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT) ||
+			!m_fragment_prog || !m_fragment_prog->output_color_masks[source_attachment])
+		{
+			semantic_reject_bits |= vk::framebuffer_feedback::reject_partial_color_export_or_mask;
+		}
+	}
+	else
+	{
+		semantic_reject_bits |= vk::framebuffer_feedback::reject_destination_dependent_write |
+			vk::framebuffer_feedback::reject_partial_color_export_or_mask;
+	}
+
+	m_framebuffer_feedback_oracle.record_request(
+	{
+		.request_serial = desc.feedback_oracle_request_serial,
+		.snapshot_serial = desc.feedback_oracle_snapshot_serial,
+		.copy_serial = desc.feedback_oracle_copy_serial,
+		.source_identity = reinterpret_cast<uptr>(desc.source_content_tracker),
+		.source_generation = desc.feedback_oracle_source_generation,
+		.view_identity = reinterpret_cast<uptr>(view),
+		.sampler_signature = get_feedback_sampler_signature(sampler),
+		.texcoord_xform_signature = texcoord_xform_signature,
+		.logical_bytes = static_cast<u64>(desc.width) * desc.height *
+			std::max<u16>(desc.depth, 1) * std::max<u8>(desc.bpp, 1),
+		.command_buffer_identity = reinterpret_cast<uptr>(m_current_command_buffer),
+		.command_buffer_reset_id = m_current_command_buffer->reset_id,
+		.request_address = desc.address,
+		.source_address = desc.external_ref_addr,
+		.pitch = desc.pitch,
+		.gcm_format = desc.gcm_format,
+		.remap = desc.remap.encoded,
+		.semantic_reject_bits = semantic_reject_bits,
+		.source_vk_format = source ? static_cast<u32>(source->format()) : 0,
+		.view_vk_format = view ? static_cast<u32>(view->format()) : 0,
+		.source_component_map = source_component_map,
+		.view_component_map = view_component_map,
+		.texcoord_scale_x = std::bit_cast<u32>(texcoord_xform.scale[0]),
+		.texcoord_scale_y = std::bit_cast<u32>(texcoord_xform.scale[1]),
+		.texcoord_bias_x = std::bit_cast<u32>(texcoord_xform.bias[0]),
+		.texcoord_bias_y = std::bit_cast<u32>(texcoord_xform.bias[1]),
+		.texcoord_clamp_min_x = std::bit_cast<u32>(texcoord_xform.clamp_min[0]),
+		.texcoord_clamp_min_y = std::bit_cast<u32>(texcoord_xform.clamp_min[1]),
+		.texcoord_clamp_max_x = std::bit_cast<u32>(texcoord_xform.clamp_max[0]),
+		.texcoord_clamp_max_y = std::bit_cast<u32>(texcoord_xform.clamp_max[1]),
+		.resolution_scale = std::bit_cast<u32>(effective_resolution_scale),
+		.wpos_scale = std::bit_cast<u32>(wpos_scale),
+		.wpos_bias_x = std::bit_cast<u32>(wpos_bias_x),
+		.wpos_bias_y = std::bit_cast<u32>(wpos_bias_y),
+		.shader_window_height = shader_window_height,
+		.source_width = static_cast<u16>(source ? std::min<u32>(source->width(), std::numeric_limits<u16>::max()) : 0u),
+		.source_height = static_cast<u16>(source ? std::min<u32>(source->height(), std::numeric_limits<u16>::max()) : 0u),
+		.texture_instruction_count = instruction_count,
+		.texture_opcode_class_mask = opcode_mask,
+		.x = desc.x,
+		.y = desc.y,
+		.width = desc.width,
+		.height = desc.height,
+		.depth = desc.depth,
+		.bpp = desc.bpp,
+		.texture_unit = static_cast<u8>(texture_unit),
+		.source_attachment = source_attachment,
+		.coordinate_source_mask = coordinate_source_mask,
+		.texture_dimension = static_cast<u8>(sampler_state.image_type),
+		.mipmap_count = static_cast<u8>(std::min<u16>(desc.mipmaps, std::numeric_limits<u8>::max())),
+		.sample_count = sampler_state.samples,
+		.shader_window_origin = static_cast<u8>(shader_window_origin),
+		.pixel_center = static_cast<u8>(pixel_center),
+		.stage = stage,
+		.reason = desc.feedback_copy_reason,
+		.outcome = desc.feedback_oracle_outcome,
+		.has_bound_view = view != nullptr,
+		.uncached = desc.do_not_cache,
+		.indexed_coordinate_source = texture_metadata && texture_metadata->has_indexed_input,
+		.mixed_coordinate_source = texture_metadata && texture_metadata->has_mixed_coordinate_sources,
+		.coordinate_expression_known_identity = coordinate_expression_known_identity,
+		.unnormalized_coordinates = sampler_info && sampler_info->unnormalizedCoordinates,
+		.texcoord_clamp = texcoord_xform.clamp,
+	});
+}
+
 void VKGSRender::begin_render_pass()
 {
 	vk::begin_renderpass(
@@ -673,6 +1072,9 @@ bool VKGSRender::bind_texture_env()
 				{
 					out_of_memory = true;
 				}
+
+				record_framebuffer_feedback_request(*sampler_state, view, fs_sampler_handles[i], i,
+					vk::framebuffer_feedback::texture_stage::fragment);
 			}
 			else
 			{
@@ -758,6 +1160,9 @@ bool VKGSRender::bind_texture_env()
 			{
 				out_of_memory = true;
 			}
+
+			record_framebuffer_feedback_request(*sampler_state, image_ptr, vs_sampler_handles[i], i,
+				vk::framebuffer_feedback::texture_stage::vertex);
 		}
 
 		if (!image_ptr)
@@ -900,6 +1305,9 @@ bool VKGSRender::bind_interpreter_texture_env()
 				{
 					out_of_memory = true;
 				}
+
+				record_framebuffer_feedback_request(*sampler_state, view, fs_sampler_handles[i], i,
+					vk::framebuffer_feedback::texture_stage::fragment);
 			}
 		}
 
@@ -1067,6 +1475,7 @@ void VKGSRender::emit_geometry(u32 sub_index)
 		m_program->bind_uniform(volatile_buffer, vk::glsl::binding_set_index_vertex, m_vs_binding_table->vertex_buffers_location + 1);
 	}
 
+	const u32 feedback_host_subdraw = m_current_draw.subdraw_id;
 	bool reload_state = (!m_current_draw.subdraw_id++);
 	vk::renderpass_op(*m_current_command_buffer, [&](const vk::command_buffer& cmd, VkRenderPass pass, VkFramebuffer fbo)
 	{
@@ -1112,6 +1521,33 @@ void VKGSRender::emit_geometry(u32 sub_index)
 
 	// Bind the new set of descriptors for use with this draw call
 	m_frame_stats.setup_time += m_profiler.duration();
+
+	const bool has_feedback_consumers = m_framebuffer_feedback_oracle.has_pending_requests();
+	if (has_feedback_consumers)
+	{
+		u32 host_draw_count = 1;
+		if (!draw_call.is_trivial_instanced_draw && !draw_call.is_single_draw() && !m_device->get_multidraw_support())
+		{
+			host_draw_count = ::size32(draw_call.get_subranges());
+		}
+
+		m_framebuffer_feedback_oracle.note_subdraw(
+		{
+			.rsx_subdraw = sub_index,
+			.host_subdraw = feedback_host_subdraw,
+			.topology = static_cast<u32>(upload_info.primitive),
+			.vertex_count = upload_info.vertex_draw_count,
+			.instance_count = draw_call.is_trivial_instanced_draw ? draw_call.pass_count() : 1,
+			.host_draw_count = host_draw_count,
+			.indexed = upload_info.index_info.has_value(),
+		});
+	}
+
+	const std::string feedback_draw_label = has_feedback_consumers
+		? fmt::format("Framebuffer feedback consumer draw={} subdraw={}", m_frame_stats.draw_calls, sub_index)
+		: std::string{};
+	vk::debug_label_scope feedback_draw_scope(*m_current_command_buffer,
+		feedback_draw_label.empty() ? nullptr : feedback_draw_label.c_str());
 
 	if (!upload_info.index_info)
 	{
@@ -1298,6 +1734,8 @@ void VKGSRender::end()
 
 	m_frame_stats.setup_time += m_profiler.duration();
 
+	begin_framebuffer_feedback_oracle_draw();
+
 	// Now bind the shader resources. It is important that this takes place after the barriers so that we don't end up with stale descriptors
 	for (int retry = 0; retry < 3; ++retry)
 	{
@@ -1355,6 +1793,8 @@ void VKGSRender::end()
 		}
 	}
 	while (draw_call.next());
+
+	m_framebuffer_feedback_oracle.finish_draw();
 
 	if (m_current_command_buffer->flags & vk::command_buffer::cb_has_conditional_render)
 	{

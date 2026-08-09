@@ -163,6 +163,22 @@ namespace vk
 		~debug_marker_scope();
 	};
 
+	class debug_label_scope
+	{
+		VkCommandBuffer m_command_buffer = VK_NULL_HANDLE;
+		bool m_active = false;
+
+	public:
+		debug_label_scope(const vk::command_buffer& cmd, const char* text);
+		debug_label_scope(const vk::command_buffer& cmd, const std::string& text);
+		~debug_label_scope();
+
+		debug_label_scope(const debug_label_scope&) = delete;
+		debug_label_scope& operator=(const debug_label_scope&) = delete;
+		debug_label_scope(debug_label_scope&&) = delete;
+		debug_label_scope& operator=(debug_label_scope&&) = delete;
+	};
+
 	VkResult wait_for_fence(fence* pFence, u64 timeout = 0ull);
 	VkResult wait_for_event(event* pEvent, u64 timeout = 0ull);
 }
