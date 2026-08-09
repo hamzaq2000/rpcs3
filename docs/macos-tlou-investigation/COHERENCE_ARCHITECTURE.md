@@ -315,23 +315,57 @@ independent source audits found no remaining blocking lifetime, resolver, or
 MFC-hook issue. The preserved app has SHA-256
 `78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`.
 
-Runtime Vulkan validation is now the gate. A bounded overlay run must first show
-`ready_hit_n > 0`, visual correctness, plausible per-reason fallback counters,
-and clean ownership/lifecycle state. Only then is an overlay-off comparison
-meaningful, and it must show fewer handled GET faults/flush handoffs without
-moving the same cost into MFC/channel waits. No runtime result exists yet.
-Production code contains no bedroom-specific address, PC, transfer-size
-signature, section identity, cadence, rank, or title key: the rule depends only
-on emulator-wide range, ownership, lifetime, epoch, copied-range, and generation
-semantics.
-Distinct gameplay scenes remain mandatory before any game-general claim.
+The bounded Vulkan validation is complete and negative. In the exact
+44.155817-second counter interior, `ready_hit_n` stayed zero while
+`ready_exact_owner_n` increased by 7,467 and `ready_directory_n` by 1,599; all
+other receipt-result deltas and every ownership safety delta were zero. The
+post-flush receipt's timing assumption is wrong for this workload. Readers
+preflight while the current exact owner still exists, enter the legacy path,
+and only then can that path flush and publish a receipt. The resulting receipt
+arrives too late for the already-concurrent group.
 
-## Phase 3: asynchronous MFC coherence broker
+This is a safe but inert negative result, not a performance result. The debug-
+overlay slice measured 875 complete frame periods in 44.990309 seconds, but one
+late SPU compile and, more fundamentally, zero branch hits make an overlay-off
+A/B meaningless. Do not repeat the receipt-only bedroom test and do not loosen
+the exact-owner rejection: doing so would copy bytes before current Cell
+backing is proven. Preserve the general ownership/lifetime/hook infrastructure.
+The exact result and artifact identity are in
+`COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`.
 
-If most faults are genuine data dependencies, merely replacing `SIGSEGV` while
-retaining one submit/wait per command cannot recover the needed frame time. Use
-the existing 16-entry MFC/tag machinery to make conflicting commands explicit
-asynchronous coherence requests:
+## Phase 3: live-owner joinability oracle and MFC coherence broker
+
+The 7,467 exact-owner rejections establish candidate volume and ordering, but
+not joinability or recoverable time. Before another behavioral branch, add a
+bounded, behavior-neutral oracle that records:
+
+- the exact logical owner/lifetime epoch and content generation observed by
+  each candidate GET;
+- prospective leader and same-generation follower counts, range overlap,
+  arrival spread, and the legacy synchronization completion shared by them;
+- primary submissions, flush handoffs, and GPU waits that one single-flight
+  operation would have replaced; and
+- MFC issue to the first tag/barrier/fence completion demand for the affected
+  command, including cases whose ordering leaves no overlap window.
+
+Only stable semantic owner/generation groups predicting material critical-path
+savings clear the implementation gate. Bedroom address, guest/host PC,
+observed transfer-size signature, cadence, rank, and title identity are not
+policy keys.
+
+If the gate passes, implement synchronous generation-keyed single-flight
+first. One leader owns the legacy synchronization for an exact current owner;
+followers may join only while the renderer, VM, section lifetime, content
+generation, and requested coverage remain pinned. Publish readiness only after
+the real synchronization has completed. Cancellation, generation advance,
+unmap, teardown, ambiguity, or failed proof wakes followers into existing safe
+handling without exposing partial local-store data. The prototype must reduce
+handled faults/handoffs and primary submissions rather than merely replacing a
+signal with a mutex wait.
+
+If true readbacks remain and the oracle proves issue-to-consumption slack, use
+the existing 16-entry MFC/tag machinery to make only those conflicting commands
+explicit asynchronous coherence requests:
 
 - leave conflicting commands pending without an artificial batching delay;
 - coalesce overlapping ranges and texture sections already waiting;
@@ -344,13 +378,11 @@ asynchronous coherence requests:
   race later LS modification;
 - keep atomic MFC transactions synchronous initially.
 
-Oracle v2 finds repeated same-generation GET handoffs, but it does not yet prove
-issue-to-consumption slack. Attempt the broker only if the synchronous ticket
-materially reduces redundant handoffs and leaves true readbacks as the bound,
-and only if the prototype reduces primary submissions/events. If the remaining
-data are true, immediately consumed dependencies with no prediction or overlap
+Oracle v2 finds repeated same-generation GET handoffs, but neither it nor the
+zero-hit receipt run proves issue-to-consumption slack. If the remaining data
+are true, immediately consumed dependencies with no prediction or overlap
 window, this is a real synchronization bound rather than an implementation
-accident.
+accident. Stop rather than moving the same wait to tag consumption.
 
 ## Deterministic PPU fault
 
@@ -405,8 +437,12 @@ gap is 21.73 ms/frame. It exposes roughly 14.94 ms/frame of true GPU/readback
 wait on deterministic faults. Even the impossible upper bound of eliminating
 all of that wait leaves about 40.1 ms/frame and another 6.8 ms/frame to recover.
 The 6.65-per-frame no-readback GET herd is therefore important alongside the
-true readbacks, but neither proves the remaining saving. Reaching 30 likely
-also requires work on the framebuffer-feedback path, guest execution, or both.
+true readbacks, but neither proves the remaining saving. Receipt v1 realizes
+none of this bound: it had zero hits because it waited until after exact-owner
+retirement. A live-owner joinability/slack oracle must now quantify how much of
+the herd and readback latency is actually coalescible or overlap-capable.
+Reaching 30 likely also requires work on the framebuffer-feedback path, guest
+execution, or both.
 In the later, nonstationary 14-FPS sample, main-PPU guest execution alone
 occupied roughly 46 ms/frame; that is not a clean critical-path measurement,
 but it rules out treating coherence as the entire problem. A plausible route

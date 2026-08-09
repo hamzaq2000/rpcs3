@@ -406,33 +406,49 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     subset passes 100 shuffled repetitions, and the root full suite passes all
     215 enabled tests with two existing tests disabled. Two independent source
     audits report no remaining blocking lifetime, resolver, or MFC-hook issue.
-    This proves only the bounded source checkpoint. No Vulkan gameplay run has
-    yet shown `ready_hit_n > 0`, visual correctness, a counter reduction, or a
-    performance improvement.
+    This proves only the bounded source checkpoint; the subsequent runtime
+    result is recorded separately below.
+40. The bounded receipt-v1 runtime capture at `6fd9d4968` rejects the
+    prototype's timing assumption. Its exact slice contains 876 package-`0x202`
+    markers defining 875 complete periods in 44.990309 seconds (19.448633 FPS
+    with the debug overlay enabled). In the 44.155817-second counter interior,
+    `ready_hit_n` increased by zero, `ready_exact_owner_n` by 7,467, and
+    `ready_directory_n` by 1,599; every other ready-result delta was zero.
+    There were 8,205 handled reads, 9,916 SPU and 859 PPU renderer faults,
+    8,205 flush waits totaling 11.171823 aggregate seconds, and 5,154
+    GPU/readback waits totaling about 17.777 aggregate seconds. Eight exact
+    ownership recounts completed with zero mismatch, missing/excess reference,
+    poison, mutation, or sequence error.
+
+    Receipt v1 assumed that later readers would arrive after a leader's legacy
+    flush had copied the bytes, retired the exact owner, and published a
+    receipt. Instead, readers preflight while that owner is still live and all
+    fall back before the receipt can exist. The branch was safe but inert: no
+    new local-store copy executed, no performance effect was possible, and the
+    overlay window supports no absolute-FPS comparison. One late SPU compile
+    cannot explain zero cumulative hits, so another receipt-only bedroom run is
+    not justified. The exact boundary and artifact identity are in
+    `COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`.
 
 ## Current blocker
 
-The implementation and source-verification gate for conservative receipt v1 is
-complete. The current blocker is one bounded Vulkan runtime validation of the
-preserved `6fd9d4968` app. First run with the debug overlay only long enough to
-establish all of the following:
+Receipt v1's runtime gate is complete and negative. Do not tune its fallback
+checks, run an overlay-off A/B, or repeat the same bedroom validation. The next
+blocker is a behavior-neutral oracle for the live-owner design. It must measure:
 
-- cumulative `CELLDIR ready_hit_n` increases, proving that a real title GET
-  reaches the receipt branch rather than only its fallbacks;
-- the scene remains visually correct and interactive, with no new black tiles,
-  stale contents, crash, device loss, or MFC-ordering symptom;
-- per-reason receipt fallback counters are internally plausible, and handled
-  GET faults/flush handoffs move in the expected direction rather than merely
-  reappearing as MFC/channel waits; and
-- ownership recount, poison, epoch, and lifecycle safety counters remain clean.
+- generation-keyed exact-owner joinability: prospective leader/follower count,
+  arrival spread, shared legacy synchronization, and the submissions/handoffs
+  a single-flight operation could actually remove; and
+- MFC issue-to-tag-consumption slack, with barriers and fences represented, to
+  show whether true readback latency can overlap useful Cell work rather than
+  merely move into a later tag wait.
 
-That overlay run is a functional/counter validation, not an absolute-FPS test.
-If it produces real hits without corruption, use one overlay-off comparison and
-then validate the same semantic rule in distinct gameplay scenes. If
-`ready_hit_n` remains zero, this checkpoint has no demonstrated runtime effect
-and should be diagnosed or rejected without a performance claim. No repeat run
-is justified for a tiny unrelated disturbance in an otherwise stable accepted
-window.
+Do not implement a behavioral broker from the 7,467 rejection count alone.
+Proceed only if the oracle predicts material critical-path savings through
+stable semantic owner/generation keys and enough ordering slack. A first
+synchronous single-flight prototype must collapse redundant handoffs; an
+asynchronous extension must also reduce primary submissions/events rather than
+relocating the same wait.
 
 The implementation contains no bedroom-specific address, PC, transfer-size
 signature, section identity, cadence, measured rank, or title ID. Its keys are
@@ -506,6 +522,11 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   directory/generation proof remains pinned. Frame end, unmap, new DMA, rebind,
   teardown, and memory pressure bound the receipt lifetime. All failure classes
   fall back without changing legacy invalidation state.
+- Negative `6fd9d4968` receipt-v1 capture in
+  `COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`: zero hits against 7,467
+  current-exact-owner and 1,599 directory rejections. The post-flush receipt is
+  too late for the concurrent reader herd. Preserve the general infrastructure,
+  but do not broaden or performance-test this inert branch.
 
 At `6fd9d4968`, the affected Release+ThinLTO build and full app link pass, all
 20 focused Cell-access tests pass, and the pin/lifecycle subset passes 100
@@ -513,7 +534,8 @@ shuffled repetitions. The root full suite passes 215/215 enabled tests with two
 existing tests disabled, and two independent source audits pass. The earlier
 13/211 result belongs to lifetime preparation, eight/206 to the ownership
 summary, 198 to oracle v2, and 195 to historical v1. Runtime Vulkan validation
-is still pending, so none of these source results is a gameplay or FPS claim.
+is complete and negative: none of these source results or the zero-hit overlay
+capture is a gameplay-performance or FPS claim.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
@@ -552,6 +574,15 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   Its executable is 75,406,304 bytes, has SHA-256
   `78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`,
   and has Mach-O UUID `10C46989-D70B-339D-9F63-83878437D9BB`.
+- The corresponding negative receipt-v1 capture is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/artifacts/cellget-receipt-v1-2026-08-08-6fd9d496`.
+  Its manifest SHA-256 is
+  `bb60f71dfac37899ee9d37d914991b5fcee9b6a111eb119cda696f8bf523156c`,
+  full-log SHA-256 is
+  `46c2523c574393bb5eb2fd89018e38911f3dacc68c4565e8de03d6a3783ff34c`,
+  exact-interval SHA-256 is
+  `ff9f023f66c471bdd9665a7de1e614f41e14455ba9145821840eb95da32a6b54`,
+  and its exact source byte range is `[13549702, 15053344)`.
 - The valid oracle-v2 capture is externally preserved at
   `/Users/hamza/Documents/rpcs3-repro/artifacts/cellfault-v2-2026-08-08-e0be3532`.
   Its manifest SHA-256 is

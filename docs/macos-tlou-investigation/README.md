@@ -29,6 +29,8 @@ live-validated oracle-v2 capture and architecture decision are in
 [`FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`](FAULT_ORACLE_V2_CAPTURE_E0BE3532.md).
 The accepted live proof of the behavior-preserving ownership summary is in
 [`OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md`](OWNERSHIP_DIRECTORY_CAPTURE_CBE0B796.md).
+The decisive zero-hit runtime result for the first collateral-GET receipt is in
+[`COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md`](COLLATERAL_GET_RECEIPT_V1_CAPTURE_6FD9D496.md).
 
 Important measurement rules:
 
@@ -91,13 +93,26 @@ also cleared on unmap, new DMA, rebind, teardown, and memory pressure.
 
 The Release+ThinLTO app links; 20/20 focused tests, 100 shuffled repetitions of
 the pin/lifecycle subset, and 215/215 enabled full-suite tests pass, with two
-existing tests disabled. Two independent source audits also pass. Runtime
-Vulkan validation is now the blocker: `CELLDIR ready_hit_n` must increase in a
-real run and the scene must remain visually correct before the counters or FPS
-can support any performance claim. The preserved executable is
+existing tests disabled. Two independent source audits also pass. The bounded
+Vulkan validation is now complete, and it falsifies the prototype's timing
+assumption: `ready_hit_n` remained zero while `ready_exact_owner_n` increased
+by 7,467 and `ready_directory_n` by 1,599. Readers arrive while the exact
+logical owner is still live; a receipt published after the legacy flush is too
+late for that concurrent group. The branch was safe but inert, makes no
+performance claim, and does not need another bedroom run. The preserved
+executable is
 `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-6fd9d496-cell-get-receipt.app`
 (SHA-256
 `78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`).
+
+The next gate is behavior-neutral measurement of generation-keyed exact-owner
+joinability and MFC issue-to-tag-consumption slack. Only if that oracle predicts
+material savings should a live-owner single-flight broker be implemented: one
+leader performs the required synchronization, same-generation followers join
+it, and real readbacks are scheduled early only where guest tag/barrier timing
+provides useful overlap. Receipt v1's failure does not invalidate the earlier
+architecture-scale coherence evidence, but it contributes zero realized
+saving toward 30 FPS.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,

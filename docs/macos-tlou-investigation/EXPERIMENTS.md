@@ -54,39 +54,40 @@ effective log configuration rather than only the intended YAML values.
 | Behavior-preserving Cell-access ownership summary (`44f581fb1`) | Fixed 16 KiB conservative counts track texture-cache `NO` owners through common buffered-section protect/expand/discard transitions. Stable read-fault probes, a cache-try-lock exact debug-only recount at five-second cadence, cache-busy count, and recount total/maximum duration are emitted in `CELLDIR`. Focused tests pass 8/8 and the full suite passes 206/206 enabled with two disabled | Proof checkpoint only: no emulation behavior changes. `clear` is only a negative texture-owner hint, not VM/ZCULL permission or a lifetime pin. Its subsequent bounded validation is recorded in the next row |
 | Valid ownership-summary capture (`cbe0b7960`) | Marker window: 825 periods/45.116754 s = 18.2859 FPS. Clean first-to-last `CELLDIR` interior: 815 frames/44.560866 s; 8,412 accepted reads, all `maybe_texture`; nine recounts; zero interval clear/inconclusive, mismatch, missing/excess reference, poison, mutation/sequence error, or cache-busy scan. Final recount: 31 sections, 5,548/5,548 references and 4,983/4,983 granules. Four of >25,000 complete-run probes conservatively fell back as inconclusive outside the interval; zero stable clear, mismatch, or poison | The behavior-neutral summary passes its live gate; no repeat bedroom run is needed. Add a quiescent lifecycle reset and real buffered-section transition tests, then use it only as the negative hint for a game-general synchronous exact GET ticket. Preserve inconclusive fallback and require cross-scene validation |
 | Safe Cell-access lifetime preparation (`6fda0daf0`) | Added a quiescent renderer reset and lifetime epoch; a separate nontexture `NO` plane for ZCULL pages and transient texture-cache prelocks; nonfatal handoff that retires the prelock only when an already-published texture owner covers its complete range; and a stable session with renderer lifetime → texture cache or ZCULL → directory as the fixed lock order. Two real `buffered_section` tests cover confirmed-range expansion/unprotect and physical-unlock/discard. Focused tests pass 13/13, the full suite passes 211/211 enabled with two disabled, and Release+ThinLTO `rpcs3_emu` builds | Behavior remains unchanged. The reset prevents stale ownership crossing renderer lifetimes; failed handoff retains conservative nontexture ownership and poisons future probes into fallback. The prerequisite is complete, so the blocker advances to the Vulkan ready-snapshot synchronous GET ticket |
-| Conservative collateral-GET receipt v1 (`6fd9d4968`) | A real linear, exclusion-free Vulkan framebuffer flush may publish its exact Cell-backing range, captured/current RTT generation, renderer epoch, and an intrusive RTT pin. A normal or optimized-list SPU GET may use the sudo alias only when there is no current exact owner, a protected native sibling, exactly one logical section/covering receipt, no nontexture owner, and matching pinned VM/renderer/cache/directory/generation state. Receipts survive immediate flush-to-discard but expire at frame end and clear on reset/rebind/destroy/new DMA/unmap/teardown/memory pressure. The OOM path now clears/purges under one exclusive cache lock and avoids re-entrant self-deadlock. Hook coverage includes C++ GET, fused-list whole elements, per-item/list fallback, and LLVM direct GET/GETB/GETF. The Release+ThinLTO app links; focused tests pass 20/20; pin/lifecycle tests pass 100 shuffled repetitions; the root suite passes 215/215 enabled with two disabled; two independent source audits pass | Source checkpoint only, with no runtime or FPS result yet. It initiates no readback, leaves siblings protected, does not mutate `flushed`/discard/predictor state, and falls back before LS modification on every failed or ambiguous proof. Next require `ready_hit_n > 0`, visual correctness, clean safety counters, and the expected fault/handoff direction in one bounded Vulkan run |
+| Conservative collateral-GET receipt v1 (`6fd9d4968`) | A real linear, exclusion-free Vulkan framebuffer flush may publish its exact Cell-backing range, captured/current RTT generation, renderer epoch, and an intrusive RTT pin. A normal or optimized-list SPU GET may use the sudo alias only when there is no current exact owner, a protected native sibling, exactly one logical section/covering receipt, no nontexture owner, and matching pinned VM/renderer/cache/directory/generation state. Receipts survive immediate flush-to-discard but expire at frame end and clear on reset/rebind/destroy/new DMA/unmap/teardown/memory pressure. The OOM path now clears/purges under one exclusive cache lock and avoids re-entrant self-deadlock. Hook coverage includes C++ GET, fused-list whole elements, per-item/list fallback, and LLVM direct GET/GETB/GETF. The Release+ThinLTO app links; focused tests pass 20/20; pin/lifecycle tests pass 100 shuffled repetitions; the root suite passes 215/215 enabled with two disabled; two independent source audits pass | Source checkpoint only. It initiates no readback, leaves siblings protected, does not mutate `flushed`/discard/predictor state, and falls back before LS modification on every failed or ambiguous proof. The next row records its completed runtime gate; source verification alone never implied reachability or an FPS result |
+| Negative receipt-v1 runtime capture (`6fd9d4968`) | Exact slice: 876 package-`0x202` markers/875 periods in 44.990309 s = 19.448633 FPS with debug overlay. The 44.155817-second counter interior added zero `ready_hit`, 7,467 `ready_exact_owner`, 1,599 `ready_directory`, 8,205 handled reads, 9,916 SPU and 859 PPU renderer faults, 8,205 flush waits/11.171823 aggregate seconds, and 5,154 GPU/readback waits/about 17.777 aggregate seconds. Eight recounts and every ownership safety counter were clean. One late SPU compile; zero kick/device-loss/audio-switch/fatal events | Safe but inert. Readers preflight while the exact owner still exists; a receipt published by the later legacy flush cannot help the already-concurrent herd. The overlay run is not an FPS comparison, the compile cannot explain zero hits, and no repeat is warranted. Do not loosen exact-owner safety or A/B this branch. Measure generation-keyed live-owner joinability and MFC issue-to-tag-consumption slack before implementing a single-flight broker |
 
 ## Next experiments
 
-1. Launch the preserved Release+ThinLTO `6fd9d4968` app for one bounded Vulkan
-   debug-overlay validation. Require a positive delta in cumulative
-   `CELLDIR ready_hit_n`, visual correctness and interactivity, clean ownership/
-   poison/lifecycle counters, and plausible per-reason receipt fallbacks. If
-   hits remain zero, report no demonstrated runtime effect and diagnose or
-   reject the branch without an FPS claim.
-2. If the branch produces hits without corruption, run one overlay-off
-   comparison. Require fewer handled GET faults and flush handoffs without
-   moving the same cost into MFC/channel waits. Do not use the overlay run for
-   absolute FPS and do not repeat a stable window for a tiny unrelated event.
-3. Validate the same semantic mechanism in distinct gameplay scenes before
-   making a general performance claim. Production code contains and may gain no
-   title/bedroom key: no observed address, PC, transfer-size signature, section
-   identity, cadence, measured rank, or title ID. Eligibility must remain a
-   general function of MFC range/direction and safe range bounds, VM/lifetime,
-   ownership, renderer epoch, copied range, and RTT generation.
-4. If the exact synchronous ticket removes handoffs but true readbacks remain
-   serialized, extend only the proven slow path into a generation-coalescing
-   asynchronous MFC broker while preserving tag, barrier, local-store, atomic,
-   pause, and shutdown semantics.
-5. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+1. Add a behavior-neutral exact-owner oracle. Group prospective requests by
+   semantic owner/generation and exact GET overlap, then measure leader/follower
+   count, arrival spread, shared legacy synchronization, and predicted avoided
+   submissions/handoffs. Also measure MFC issue to first tag/barrier/fence
+   completion demand for each affected command. Do not key behavior or the
+   proposed policy on title, scene, address, PC, observed size, cadence, or rank.
+2. Use one bounded overlay capture to gate the live-owner design. Proceed only
+   if stable semantic groups predict material critical-path savings and the tag
+   data show useful overlap for real readbacks. Do not repeat receipt v1 or run
+   an overlay-off comparison for its zero-hit branch.
+3. If joinability is positive, implement synchronous generation-keyed
+   single-flight first: one leader performs the required synchronization and
+   same-generation followers join it. Require redundant handled faults/
+   handoffs and primary submissions to collapse without corruption or moved
+   wait time.
+4. Add asynchronous producer scheduling only where the measured MFC slack can
+   hide a true readback while preserving tags, barriers, fences, local-store,
+   atomics, pause, savestate, cancellation, and shutdown semantics.
+5. Validate any successful semantic broker in distinct gameplay scenes before
+   making a game-general or FPS claim.
+6. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-6. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+7. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-7. Only after the supported renderer path is measured, isolate-test the removed
+8. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-8. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+9. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
