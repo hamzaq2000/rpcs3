@@ -54,32 +54,26 @@ effective log configuration rather than only the intended YAML values.
 | Behavior-preserving Cell-access ownership summary (`44f581fb1`) | Fixed 16 KiB conservative counts track texture-cache `NO` owners through common buffered-section protect/expand/discard transitions. Stable read-fault probes, a cache-try-lock exact debug-only recount at five-second cadence, cache-busy count, and recount total/maximum duration are emitted in `CELLDIR`. Focused tests pass 8/8 and the full suite passes 206/206 enabled with two disabled | Proof checkpoint only: no emulation behavior changes. `clear` is only a negative texture-owner hint, not VM/ZCULL permission or a lifetime pin. Its subsequent bounded validation is recorded in the next row |
 | Valid ownership-summary capture (`cbe0b7960`) | Marker window: 825 periods/45.116754 s = 18.2859 FPS. Clean first-to-last `CELLDIR` interior: 815 frames/44.560866 s; 8,412 accepted reads, all `maybe_texture`; nine recounts; zero interval clear/inconclusive, mismatch, missing/excess reference, poison, mutation/sequence error, or cache-busy scan. Final recount: 31 sections, 5,548/5,548 references and 4,983/4,983 granules. Four of >25,000 complete-run probes conservatively fell back as inconclusive outside the interval; zero stable clear, mismatch, or poison | The behavior-neutral summary passes its live gate; no repeat bedroom run is needed. Add a quiescent lifecycle reset and real buffered-section transition tests, then use it only as the negative hint for a game-general synchronous exact GET ticket. Preserve inconclusive fallback and require cross-scene validation |
 | Safe Cell-access lifetime preparation (`6fda0daf0`) | Added a quiescent renderer reset and lifetime epoch; a separate nontexture `NO` plane for ZCULL pages and transient texture-cache prelocks; nonfatal handoff that retires the prelock only when an already-published texture owner covers its complete range; and a stable session with renderer lifetime → texture cache or ZCULL → directory as the fixed lock order. Two real `buffered_section` tests cover confirmed-range expansion/unprotect and physical-unlock/discard. Focused tests pass 13/13, the full suite passes 211/211 enabled with two disabled, and Release+ThinLTO `rpcs3_emu` builds | Behavior remains unchanged. The reset prevents stale ownership crossing renderer lifetimes; failed handoff retains conservative nontexture ownership and poisons future probes into fallback. The prerequisite is complete, so the blocker advances to the Vulkan ready-snapshot synchronous GET ticket |
+| Conservative collateral-GET receipt v1 (`6fd9d4968`) | A real linear, exclusion-free Vulkan framebuffer flush may publish its exact Cell-backing range, captured/current RTT generation, renderer epoch, and an intrusive RTT pin. A normal or optimized-list SPU GET may use the sudo alias only when there is no current exact owner, a protected native sibling, exactly one logical section/covering receipt, no nontexture owner, and matching pinned VM/renderer/cache/directory/generation state. Receipts survive immediate flush-to-discard but expire at frame end and clear on reset/rebind/destroy/new DMA/unmap/teardown/memory pressure. The OOM path now clears/purges under one exclusive cache lock and avoids re-entrant self-deadlock. Hook coverage includes C++ GET, fused-list whole elements, per-item/list fallback, and LLVM direct GET/GETB/GETF. The Release+ThinLTO app links; focused tests pass 20/20; pin/lifecycle tests pass 100 shuffled repetitions; the root suite passes 215/215 enabled with two disabled; two independent source audits pass | Source checkpoint only, with no runtime or FPS result yet. It initiates no readback, leaves siblings protected, does not mutate `flushed`/discard/predictor state, and falls back before LS modification on every failed or ambiguous proof. Next require `ready_hit_n > 0`, visual correctness, clean safety counters, and the expected fault/handoff direction in one bounded Vulkan run |
 
 ## Next experiments
 
-1. Implement the smallest Vulkan ready-snapshot synchronous exact-GET ticket.
-   Pin the VM range/lifetime and the texture-cache exact owners for the entire
-   copy. With renderer lifetime and cache ownership held, acquire the directory
-   stable session innermost and require a matching epoch and
-   `maybe_nontexture == false`. Accept only a CPU-visible snapshot already ready
-   for each exact owner's current content generation. Preserve same-native-page
-   siblings, never mutate the legacy section `flushed` state, and fall back on
-   every failed or ambiguous proof—including the observed inconclusive probe
-   case.
-2. Before a behavioral game launch, cover concurrency, VM and cache lifetime
-   races, exact-owner replacement, sibling protection, ready/stale generations,
-   normal and list GET, tag/barrier ordering, invalidation, and generation wrap.
-   VM/ZCULL, atomic, Raw-SPU, unsupported, nontexture-owned, and ambiguous cases
-   must retain the old path. The common negative path must remain allocation-free
-   and a few local loads: millions of ordinary MFC submissions per second cannot
-   call unconditionally into RSX.
-3. Use the bedroom only to functionally validate the prototype and measure one
-   overlay-off A/B. Require fewer handled GET faults and flush handoffs without
-   moving the time into MFC/channel waits or introducing visual corruption.
-   Then repeat the semantic mechanism in distinct gameplay scenes before making
-   a general performance claim. Never key production behavior on an address,
-   PC, transfer size, section identity, cadence, signature, or any other bedroom
-   observation.
+1. Launch the preserved Release+ThinLTO `6fd9d4968` app for one bounded Vulkan
+   debug-overlay validation. Require a positive delta in cumulative
+   `CELLDIR ready_hit_n`, visual correctness and interactivity, clean ownership/
+   poison/lifecycle counters, and plausible per-reason receipt fallbacks. If
+   hits remain zero, report no demonstrated runtime effect and diagnose or
+   reject the branch without an FPS claim.
+2. If the branch produces hits without corruption, run one overlay-off
+   comparison. Require fewer handled GET faults and flush handoffs without
+   moving the same cost into MFC/channel waits. Do not use the overlay run for
+   absolute FPS and do not repeat a stable window for a tiny unrelated event.
+3. Validate the same semantic mechanism in distinct gameplay scenes before
+   making a general performance claim. Production code contains and may gain no
+   title/bedroom key: no observed address, PC, transfer-size signature, section
+   identity, cadence, measured rank, or title ID. Eligibility must remain a
+   general function of MFC range/direction and safe range bounds, VM/lifetime,
+   ownership, renderer epoch, copied range, and RTT generation.
 4. If the exact synchronous ticket removes handoffs but true readbacks remain
    serialized, extend only the proven slow path into a generation-coalescing
    asynchronous MFC broker while preserving tag, barrier, local-store, atomic,

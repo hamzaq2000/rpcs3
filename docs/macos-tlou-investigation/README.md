@@ -73,25 +73,31 @@ a stable clear. Another bedroom ownership-summary run is not needed.
 
 The stable probe remains only a conservative negative hint about texture-cache
 ownership; it does not prove VM or ZCULL safety and does not pin a section or
-protection lifetime. Commit `6fda0daf0` closes the behavior-neutral lifetime
-prerequisites: a proven quiescent renderer boundary clears both ownership
-planes and advances an epoch; a separate nontexture `NO` plane covers ZCULL
-pages and transient texture-cache prelocks; and a nonfatal handoff removes a
-prelock only after exact texture-owner coverage is published. Failure retains
-the conservative owner and forces future behavioral users to fall back. A
-stable directory session also codifies the global lock order as renderer
-lifetime, texture cache or ZCULL, then the directory innermost. Two tests drive
-real `buffered_section` protect/confirmed-range expansion/unprotect and
-physical-unlock/discard lifecycles. All 13 focused and 211 enabled full-suite
-tests pass (two remain disabled), and Release+ThinLTO `rpcs3_emu` builds.
+protection lifetime. Commit `6fda0daf0` closes those behavior-neutral
+prerequisites with a renderer epoch, a nontexture `NO` plane, conservative
+prelock handoff, and the renderer-lifetime -> texture-cache -> directory lock
+order.
 
-No result through `6fda0daf0` changes an access decision. The immediate blocker
-is the smallest Vulkan ready-snapshot synchronous GET ticket. It may bypass the
-legacy fault path only while the VM range and lifetime are pinned, the texture
-cache validates and pins every exact owner, an innermost stable session reports
-no nontexture owner, and each selected CPU-visible snapshot is ready for the
-current content generation. It must not mutate the legacy section `flushed`
-state; any failed proof falls back unchanged.
+Commit `6fd9d4968` adds the first deliberately narrow behavioral use. After a
+real linear, exclusion-free Vulkan framebuffer flush has copied bytes into Cell
+backing, it records the exact copied range, source content generation, renderer
+epoch, and an intrusive RTT lifetime pin. A later ordinary SPU GET can reuse
+those exact bytes only when the request has no current logical owner, a locked
+native-page sibling explains the trap, exactly one logical section/receipt is
+relevant, and all VM, renderer, cache, nontexture, epoch, and current-generation
+proofs remain pinned. It initiates no readback and changes no legacy protection,
+discard, predictor, or `flushed` state. Receipts expire at frame end and are
+also cleared on unmap, new DMA, rebind, teardown, and memory pressure.
+
+The Release+ThinLTO app links; 20/20 focused tests, 100 shuffled repetitions of
+the pin/lifecycle subset, and 215/215 enabled full-suite tests pass, with two
+existing tests disabled. Two independent source audits also pass. Runtime
+Vulkan validation is now the blocker: `CELLDIR ready_hit_n` must increase in a
+real run and the scene must remain visually correct before the counters or FPS
+can support any performance claim. The preserved executable is
+`/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-6fd9d496-cell-get-receipt.app`
+(SHA-256
+`78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`).
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,

@@ -364,35 +364,82 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     All 13 focused tests and all 211 enabled tests pass, with two existing tests
     disabled, and Release+ThinLTO `rpcs3_emu` builds. Nothing in the checkpoint
     changes an access decision.
+39. Commit `6fd9d4968` is the first behavior-changing Cell/RSX coherence
+    checkpoint, but its scope is intentionally narrower than a general ready-
+    snapshot ticket. A normal Vulkan framebuffer flush may publish a receipt
+    only after it actually copied a linear, exclusion-free range into Cell
+    backing and the source RTT still has the captured nonzero content
+    generation. The receipt records that exact copied range, generation, and
+    renderer epoch; it owns an intrusive RTT reference so a flush-to-discard
+    transition cannot retire or reuse the producer while the proof survives.
+    A later ordinary SPU GET may copy through the sudo alias only for native-
+    page collateral: the exact requested range has no current locked logical
+    owner, a protected native-page sibling still exists, exactly one logical
+    section and one covering receipt explain the request's intersection with
+    that section, and the pinned RTT remains live at the receipt generation.
+    Bytes in a request gap outside that sole logical section remain ordinary
+    guest-authoritative Cell backing. Every ambiguity or failed VM, lifetime,
+    epoch, nontexture, sibling, exact-owner, receipt, or generation check falls
+    back to the old fault path before local store is modified.
+
+    Receipt lifetime is bounded deliberately. A receipt survives the immediate
+    flush-to-discard handoff, but reset, rebind, destroy, a new DMA transfer, an
+    overlapping VM unmap, renderer teardown, memory pressure, or frame end
+    clears it. Frame expiry bounds retained RTT lifetime and stale-section scan
+    cost. The memory-pressure path now clears receipts and performs base texture-
+    cache purging under the same exclusive cache lock; a re-entrant callback
+    that cannot acquire that lock skips collection instead of racing a ticket
+    or self-deadlocking. The implementation never unprotects or discards a
+    sibling, advances a predictor, initiates a readback, or mutates the legacy
+    buffered-section `flushed` state.
+
+    Hook coverage includes the normal C++ GET path, each whole element in the
+    fused six-element list fast path, the per-item inline list path, list
+    fallback through normal C++, and LLVM direct GET/GETB/GETF. Accurate DMA,
+    MFC debug, PUT/SDCRZ, atomic commands, Raw-SPU/MMIO, RSX local memory,
+    zero/oversize/wrapping transfers, 64 KiB-crossing ranges, unreadable VM,
+    unsupported renderers, exact owners, nontexture ownership, and ambiguous
+    sections all retain existing behavior. MFC barrier/tag completion and
+    `last_faddr` cleanup remain on their existing control-flow boundaries.
+
+    The Release+ThinLTO app links, all 20 focused tests pass, the pin/lifecycle
+    subset passes 100 shuffled repetitions, and the root full suite passes all
+    215 enabled tests with two existing tests disabled. Two independent source
+    audits report no remaining blocking lifetime, resolver, or MFC-hook issue.
+    This proves only the bounded source checkpoint. No Vulkan gameplay run has
+    yet shown `ready_hit_n > 0`, visual correctness, a counter reduction, or a
+    performance improvement.
 
 ## Current blocker
 
-The behavior-neutral ownership and lifetime prerequisites are complete; no
-repeat bedroom-only summary run is needed. The current blocker is the smallest
-game-general Vulkan ready-snapshot synchronous GET ticket. Its eligibility
-proof must remain valid for the entire exact copy:
+The implementation and source-verification gate for conservative receipt v1 is
+complete. The current blocker is one bounded Vulkan runtime validation of the
+preserved `6fd9d4968` app. First run with the debug overlay only long enough to
+establish all of the following:
 
-- pin the VM mapping/range and its lifetime;
-- hold the renderer-lifetime shared lock and the texture-cache lifetime needed
-  to validate and pin every exact intersecting owner;
-- acquire the ownership-directory stable session innermost, after those source
-  locks, and require `maybe_nontexture == false` as well as the matching epoch;
-- accept only a CPU-visible Vulkan snapshot that is already ready and belongs
-  to the owner's current content generation; and
-- copy exact bytes through the safe alias without changing the legacy
-  buffered-section `flushed` flag or its invalidation semantics.
+- cumulative `CELLDIR ready_hit_n` increases, proving that a real title GET
+  reaches the receipt branch rather than only its fallbacks;
+- the scene remains visually correct and interactive, with no new black tiles,
+  stale contents, crash, device loss, or MFC-ordering symptom;
+- per-reason receipt fallback counters are internally plausible, and handled
+  GET faults/flush handoffs move in the expected direction rather than merely
+  reappearing as MFC/channel waits; and
+- ownership recount, poison, epoch, and lifecycle safety counters remain clean.
 
-If any range, lifetime, exact-owner, nontexture, readiness, generation, or
-ordering proof fails, the request must retain the existing fault path. The
-ticket must preserve same-native-page sibling protection and keep
-VM/ZCULL/atomic/Raw-SPU, unsupported, and ambiguous cases on that path. The
-ordinary MFC negative path remains a few allocation-free local loads. The four
-complete-run inconclusive probes remain fallbacks, never clear results.
+That overlay run is a functional/counter validation, not an absolute-FPS test.
+If it produces real hits without corruption, use one overlay-off comparison and
+then validate the same semantic rule in distinct gameplay scenes. If
+`ready_hit_n` remains zero, this checkpoint has no demonstrated runtime effect
+and should be diagnosed or rejected without a performance claim. No repeat run
+is justified for a tiny unrelated disturbance in an otherwise stable accepted
+window.
 
-Use the bedroom for functional validation and a later overlay-off A/B, then
-validate the semantic mechanism in distinct TLoU scenes. Production code may
-not depend on any observed bedroom address, PC, transfer size, section identity,
-cadence, signature, or measured rank.
+The implementation contains no bedroom-specific address, PC, transfer-size
+signature, section identity, cadence, measured rank, or title ID. Its keys are
+only general emulator semantics: MFC direction/range, VM readability and lifetime,
+texture/nontexture ownership, renderer epoch, actual copied range, and current
+RTT content generation. The bedroom remains a controlled microscope; a
+bedroom-only win is insufficient for a game-general claim.
 
 Direct PPU JIT accesses still rely on host protection and remain a later
 producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
@@ -449,13 +496,24 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
   texture prelocks, conservative exact-coverage handoff, and an innermost
   stable directory session with explicit lock order. Two real
   `buffered_section` lifecycle tests cover confirmed-range expansion/unprotect
-  and physical-unlock/discard. This prepares but does not implement the Vulkan
-  ready-snapshot synchronous GET ticket.
+  and physical-unlock/discard.
+- Conservative collateral-GET receipt v1 in `6fd9d4968`: an actual linear,
+  exclusion-free Vulkan framebuffer flush can publish its exact Cell-backing
+  range, source generation, renderer epoch, and an intrusive RTT lifetime pin.
+  An ordinary or optimized-list SPU GET can use that backing only when it has no
+  current exact owner, a protected native sibling explains the trap, exactly
+  one receipt covers the logical intersection, and every VM/lifetime/cache/
+  directory/generation proof remains pinned. Frame end, unmap, new DMA, rebind,
+  teardown, and memory pressure bound the receipt lifetime. All failure classes
+  fall back without changing legacy invalidation state.
 
-At `6fda0daf0`, all 13 focused Cell-access tests and all 211 enabled tests pass;
-two existing tests remain disabled, and Release+ThinLTO `rpcs3_emu` builds. The
-eight/206 result belongs to the earlier ownership-summary checkpoint, the 198
-result to oracle v2, and the 195 result to historical v1.
+At `6fd9d4968`, the affected Release+ThinLTO build and full app link pass, all
+20 focused Cell-access tests pass, and the pin/lifecycle subset passes 100
+shuffled repetitions. The root full suite passes 215/215 enabled tests with two
+existing tests disabled, and two independent source audits pass. The earlier
+13/211 result belongs to lifetime preparation, eight/206 to the ownership
+summary, 198 to oracle v2, and 195 to historical v1. Runtime Vulkan validation
+is still pending, so none of these source results is a gameplay or FPS claim.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer
@@ -489,6 +547,11 @@ texture-cache decisions; it is not part of the isolated boot-fix commit.
   Its executable SHA-256 is
   `91fc7261878e31cca83c9325c10b61874845e4f207bbf4879ff22af874c76cc9`,
   and its embedded build identity is `19709-e0be3532`.
+- The collateral-GET receipt-v1 Release+ThinLTO app is externally preserved at
+  `/Users/hamza/Documents/rpcs3-repro/binaries/rpcs3-6fd9d496-cell-get-receipt.app`.
+  Its executable is 75,406,304 bytes, has SHA-256
+  `78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`,
+  and has Mach-O UUID `10C46989-D70B-339D-9F63-83878437D9BB`.
 - The valid oracle-v2 capture is externally preserved at
   `/Users/hamza/Documents/rpcs3-repro/artifacts/cellfault-v2-2026-08-08-e0be3532`.
   Its manifest SHA-256 is

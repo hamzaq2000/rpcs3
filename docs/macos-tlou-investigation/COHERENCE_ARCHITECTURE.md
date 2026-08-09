@@ -161,7 +161,7 @@ no additional bedroom-only attribution pass is required before phase 2.
 
 ## Phase 2: generation-keyed logical directory, shadow, and exact GET ticket
 
-### Behavior-preserving ownership and lifetime checkpoints
+### Ownership, lifetime, and first behavioral checkpoints
 
 Commit `44f581fb1`, the first phase-2 checkpoint, deliberately stops before
 changing an access decision. It maintains a fixed 16 KiB conservative count of
@@ -226,8 +226,8 @@ focused tests and all 211 enabled tests pass, with two existing tests disabled,
 and Release+ThinLTO `rpcs3_emu` builds. The earlier `44f581fb1` result was 8/8
 focused and 206/206 enabled. Neither checkpoint changes an access decision.
 
-Separate logical ownership and synchronized content state from trap
-granularity:
+The architecture still separates logical ownership and synchronized content
+state from trap granularity:
 
 - Track exact section ranges with conservative 4 KiB read/write conflict bits,
   RSX content generation, CPU-shadow synchronization generation, and lifetime
@@ -239,35 +239,60 @@ granularity:
   pin the exact VM range/mapping and each exact cache owner for the duration of
   a behavioral copy. The summary and epoch alone cannot prevent VM unmap or
   section reuse. A stale false negative would silently corrupt guest memory.
-- Publish a CPU-visible shadow only after exact intersecting sections are
-  synchronized. Its generation is reusable by later readers until the RSX
-  content generation changes; publication and invalidation must be ordered with
-  the same ownership transition.
+- Publish reusable CPU-visible state only after an exact synchronization is
+  complete. Its generation is reusable by later readers only while the RSX
+  content generation and all associated lifetimes remain current.
 
-The first behavioral step is a Vulkan ready-snapshot RAII
-`cell_get_ticket{EA, size, tag/barrier state}`. Its acquisition order is:
+Commit `6fd9d4968` implements a still narrower v1 than the originally proposed
+general snapshot ticket: a receipt for bytes already copied into ordinary Cell
+backing by the existing Vulkan framebuffer flush. The receipt is metadata, not
+a second shadow buffer and not permission to synchronize. Publication occurs
+only after `imp_flush()` really completes a linear, exclusion-free copy, and
+only when the nonzero content generation captured at DMA setup still equals the
+source RTT generation. `finish_flush()` then records the exact copied range,
+generation, and renderer epoch and acquires an intrusive RTT reference while
+the section's existing locked reference is still live. A skipped flush never
+publishes a receipt.
 
-1. pin and validate the exact VM range/mapping lifetime;
-2. hold the renderer-lifetime shared lock, acquire the texture-cache lifetime,
-   and resolve and pin every exact intersecting owner;
-3. acquire the directory stable session innermost, verify the same renderer
-   epoch, and require `maybe_nontexture == false`; and
-4. require every selected CPU-visible Vulkan snapshot to be ready for its
-   owner's current content generation.
+The intrusive receipt reference closes the flush-to-discard lifetime gap. A
+receipt can outlive that immediate discard, but reset, rebind, destroy, a new
+DMA transfer, overlapping VM unmap, renderer teardown, memory pressure, and
+every Vulkan frame end clear it. Frame expiry deliberately bounds retained RTT
+lifetime and stale-section lookup cost. Memory-pressure collection now clears
+receipts and runs the base purge while holding the same exclusive cache lock;
+if an OOM callback re-enters while that lock is held, collection returns without
+self-deadlocking. The RTT content generation is atomic because the SPU validates
+it outside the RSX thread.
 
-The ticket then either:
+The read-side acquisition and proof are conservative and ordered:
 
-1. returns the normal base pointer when no protected native page is involved;
-2. copies exact bytes from already-ready, current-generation snapshots through
-   the safe alias while every range/owner/lifetime pin remains held; or
-3. falls back unchanged when any range, owner, nontexture, readiness,
-   generation, epoch, or semantic check fails.
+1. accept only an ordinary main-memory GET of 1--16 KiB whose 32-bit range does
+   not wrap or cross a 64 KiB pin boundary; reject accurate-DMA/debug modes,
+   RSX local memory, Raw-SPU/MMIO, and unreadable VM;
+2. require the allocation-free 16 KiB summary to report `maybe_texture`, then
+   pin the exact VM range before acquiring renderer or cache state;
+3. hold the published Vulkan renderer lifetime and its epoch, take the texture-
+   cache reader lock, and acquire the stable directory session innermost;
+4. require the same epoch, no nontexture owner, and stable `maybe_texture`;
+5. reject any current locked logical owner overlapping the exact request, and
+   require at least one still-protected native-page sibling to explain why the
+   direct guest access would fault;
+6. require exactly one logical section and exactly one receipt. Only
+   `request intersection section_full_range` must be inside the receipt; bytes
+   in a request gap outside the sole logical section remain guest-authoritative;
+7. require a live framebuffer-storage section, its receipt-pinned RTT, and an
+   exact receipt-generation match with that RTT's current generation; and
+8. while every pin remains held, copy the requested bytes through the sudo alias
+   into local store. Any failed or ambiguous proof returns to the legacy path
+   before local store is changed.
 
-This ticket is a consumer of already-ready snapshots, not a second invalidator.
-It must not set, clear, or otherwise repurpose the legacy buffered-section
-`flushed` flag; that state remains owned by the existing flush/invalidation
-machinery. A later ticket may initiate or coalesce a stale-generation sync only
-after this conservative ready-only branch is correct and measured.
+This deliberately handles native-page collateral only. It will not bypass a
+genuine exact GPU owner, initiate a readback, unprotect/discard a sibling,
+advance the cache predictor, or set, clear, or repurpose the legacy
+buffered-section `flushed` state. Partial or stale receipts, multiple logical
+sections, missing renderer, epoch changes, nontexture ownership, missing
+siblings, and directory uncertainty each have an explicit cumulative
+`CELLDIR` fallback counter beside `ready_hit_n`.
 
 Same-native-page sibling sections are keepers: they remain logically owned and
 physically protected while exact requested bytes are accessed through the sudo
@@ -275,21 +300,31 @@ alias. Simply enabling strict bounds in the current invalidator is unsafe
 because non-target siblings can be erased from the re-protection plan. Partial
 PUTs must preserve untouched GPU-owned bytes.
 
-The first prototype covers normal and optimized-list GETs because v2 proves
-their repeated same-generation handoff cost. PUT/SDCRZ, GETLLAR/PUTLLC/PUTLLUC,
-Raw-SPU MMIO, ZCULL, ambiguous ownership, and unsupported mappings retain the
-existing behavior until separately proven. MFC tag and barrier completion must
-remain observationally identical.
+Hook coverage is normal C++ GET, one attempt per whole element in the fused six-
+element list fast path (including its multi-chunk 256/512-byte cases), per-item
+inline list GET, list fallback through the normal C++ path, and LLVM direct
+GET/GETB/GETF after their existing barrier and MMIO gates. PUT/SDCRZ, atomics,
+unsupported renderers/mappings, and all rejected semantic cases retain existing
+behavior. MFC context attribution wraps the helper and fallback, while tag/
+barrier completion and `last_faddr` cleanup remain observationally unchanged.
 
-Focused ticket tests must cover VM and cache lifetime races, exact-owner
-replacement, nontexture ownership, sibling protection, ready/stale generation,
-invalidation, generation wrap, normal and list GETs, and MFC ordering before a
-behavioral game launch. The synchronous ticket is an enabling prototype.
-Continue only if it materially reduces handled GET faults and flush handoffs
-without moving the same cost into channel/MFC waits. Bedroom validation is
-followed by distinct gameplay scenes; no production branch may depend on a
-bedroom address, PC, transfer size, section identity, cadence, signature, or
-measured rank, and a bedroom-only win is rejected.
+Source verification passes: the affected Release+ThinLTO build and full app
+link, 20/20 focused tests, 100 shuffled repetitions of the pin/lifecycle subset,
+and 215/215 enabled root-suite tests with two existing tests disabled. Two
+independent source audits found no remaining blocking lifetime, resolver, or
+MFC-hook issue. The preserved app has SHA-256
+`78161278460f618b18beb356fc0fcfafb4bda9978cd0c72e5116a7b45e6b8232`.
+
+Runtime Vulkan validation is now the gate. A bounded overlay run must first show
+`ready_hit_n > 0`, visual correctness, plausible per-reason fallback counters,
+and clean ownership/lifecycle state. Only then is an overlay-off comparison
+meaningful, and it must show fewer handled GET faults/flush handoffs without
+moving the same cost into MFC/channel waits. No runtime result exists yet.
+Production code contains no bedroom-specific address, PC, transfer-size
+signature, section identity, cadence, rank, or title key: the rule depends only
+on emulator-wide range, ownership, lifetime, epoch, copied-range, and generation
+semantics.
+Distinct gameplay scenes remain mandatory before any game-general claim.
 
 ## Phase 3: asynchronous MFC coherence broker
 
