@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "Common/cell_access_coherence.h"
 #include "Core/RSXEngLock.hpp"
 #include "Core/RSXReservationLock.hpp"
 #include "RSXThread.h"
@@ -30,7 +31,10 @@ namespace rsx
 				{
 					if (p.second.prot != utils::protection::rw)
 					{
+						const auto range = utils::address_range32::start_length(p.first, utils::get_page_size());
+						auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation(range, true);
 						utils::memory_protect(vm::base(p.first), utils::get_page_size(), utils::protection::rw);
+						mutation.commit({}, false);
 					}
 				}
 
@@ -828,8 +832,11 @@ namespace rsx
 
 				if (page.prot == utils::protection::rw)
 				{
+					const auto range = utils::address_range32::start_length(page_address, utils::get_page_size());
+					auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation({}, false);
 					utils::memory_protect(vm::base(page_address), utils::get_page_size(), utils::protection::no);
 					page.prot = utils::protection::no;
+					mutation.commit(range, true);
 				}
 			}
 			else
@@ -876,8 +883,11 @@ namespace rsx
 
 				if (page.prot != utils::protection::rw)
 				{
+					const auto range = utils::address_range32::start_length(this_address, utils::get_page_size());
+					auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation(range, true);
 					utils::memory_protect(vm::base(this_address), utils::get_page_size(), utils::protection::rw);
 					page.prot = utils::protection::rw;
+					mutation.commit({}, false);
 				}
 
 				while (page.has_refs())
@@ -922,8 +932,11 @@ namespace rsx
 						else
 						{
 							// R/W to stale block, unload it and move on
+							const auto range = utils::address_range32::start_length(page_address, utils::get_page_size());
+							auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation(range, true);
 							utils::memory_protect(vm::base(page_address), utils::get_page_size(), utils::protection::rw);
 							m_locked_pages[location].erase(page_address);
+							mutation.commit({}, false);
 
 							return true;
 						}

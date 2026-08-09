@@ -1251,6 +1251,11 @@ namespace rsx
 
 		if (!is_initialized)
 		{
+			// The fully-derived renderer exists, backend initialization has not yet
+			// created any protected sections, and Cell execution has not resumed.
+			// This is the only boundary allowed to discard a previous renderer's
+			// ownership summary and advance its lifetime epoch.
+			cell_access::g_ownership_directory.begin_renderer_lifetime_quiescent();
 			g_fxo->get<rsx::dma_manager>().init();
 			on_init_thread();
 

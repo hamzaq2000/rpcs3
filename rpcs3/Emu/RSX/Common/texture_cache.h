@@ -10,6 +10,7 @@
 #include "texture_cache_helpers.h"
 
 #include <array>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 
@@ -4085,6 +4086,7 @@ namespace rsx
 				src_area.y2 += scaled_clip_offset_y;
 			}
 
+			std::optional<address_range32> transient_prelock;
 			if (!cached_dest && !dst_is_render_target)
 			{
 				ensure(!dest_texture);
@@ -4119,7 +4121,10 @@ namespace rsx
 					{
 						// Keep Cell from touching the range we need
 						const auto prot_range = dst_range.to_page_range();
+						auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation({}, false);
 						utils::memory_protect(vm::base(prot_range.start), prot_range.length(), utils::protection::no);
+						mutation.commit(prot_range, true);
+						transient_prelock = prot_range;
 
 						force_dma_load = true;
 					}
@@ -4157,7 +4162,10 @@ namespace rsx
 						// HACK: workaround for data race with Cell
 						// Pre-lock the memory range we'll be touching, then load with super_ptr
 						const auto prot_range = dst_range.to_page_range();
+						auto mutation = cell_access::g_ownership_directory.begin_nontexture_mutation({}, false);
 						utils::memory_protect(vm::base(prot_range.start), prot_range.length(), utils::protection::no);
+						mutation.commit(prot_range, true);
+						transient_prelock = prot_range;
 
 						const auto pitch_in_block = dst.pitch / dst_bpp;
 						std::vector<rsx::subresource_layout> subresource_layout;
@@ -4199,6 +4207,13 @@ namespace rsx
 				lock.upgrade();
 
 				cached_dest->reprotect(utils::protection::no, { mem_offset, dst_payload_length });
+				if (transient_prelock)
+				{
+					// Failure retains the conservative nontexture owner and poisons the
+					// directory. It must not change the existing emulation path.
+					static_cast<void>(cell_access::g_ownership_directory.handoff_nontexture_to_texture(
+						*transient_prelock, cached_dest->get_locked_range()));
+				}
 				cached_dest->touch(m_cache_update_tag);
 				update_cache_tag();
 

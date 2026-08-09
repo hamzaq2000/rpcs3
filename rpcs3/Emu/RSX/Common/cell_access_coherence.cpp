@@ -6,11 +6,12 @@ namespace rsx::cell_access
 	ownership_directory g_ownership_directory;
 
 	ownership_directory::mutation::mutation(ownership_directory& owner,
-		const utils::address_range32& old_range, bool old_no_access) noexcept
+		const utils::address_range32& old_range, bool old_no_access, bool nontexture) noexcept
 		: m_owner(&owner)
 		, m_lock(owner.m_writer_mutex)
 		, m_old_range(old_range)
 		, m_old_no_access(old_no_access)
+		, m_nontexture(nontexture)
 	{
 		const u64 previous = m_owner->m_sequence.fetch_add(1, std::memory_order_acq_rel);
 		if (previous & 1)
@@ -35,10 +36,22 @@ namespace rsx::cell_access
 	void ownership_directory::mutation::commit(const utils::address_range32& new_range, bool new_no_access) noexcept
 	{
 		ensure(m_owner && !m_committed);
-		m_owner->apply_transition(m_old_range, m_old_no_access, new_range, new_no_access);
+		m_owner->apply_transition(m_old_range, m_old_no_access, new_range, new_no_access, m_nontexture);
 		m_owner->finish_mutation();
 		m_committed = true;
 		m_lock.unlock();
+	}
+
+	ownership_directory::stable_session::stable_session(ownership_directory& owner) noexcept
+		: m_owner(&owner)
+		, m_lock(owner.m_writer_mutex)
+	{
+	}
+
+	stable_ownership_snapshot ownership_directory::stable_session::probe(u32 address, u32 size) const noexcept
+	{
+		ensure(m_owner);
+		return m_owner->probe_locked(address, size);
 	}
 
 	ownership_directory::recount_session::recount_session(ownership_directory& owner) noexcept
@@ -80,12 +93,23 @@ namespace rsx::cell_access
 	ownership_directory::mutation ownership_directory::begin_mutation(
 		const utils::address_range32& old_range, bool old_no_access) noexcept
 	{
-		return mutation(*this, old_range, old_no_access);
+		return mutation(*this, old_range, old_no_access, false);
+	}
+
+	ownership_directory::mutation ownership_directory::begin_nontexture_mutation(
+		const utils::address_range32& old_range, bool old_no_access) noexcept
+	{
+		return mutation(*this, old_range, old_no_access, true);
 	}
 
 	ownership_directory::recount_session ownership_directory::begin_recount() noexcept
 	{
 		return recount_session(*this);
+	}
+
+	ownership_directory::stable_session ownership_directory::begin_stable_session() noexcept
+	{
+		return stable_session(*this);
 	}
 
 	std::pair<u32, u32> ownership_directory::granule_span(const utils::address_range32& range) noexcept
@@ -94,9 +118,11 @@ namespace rsx::cell_access
 		return {range.start >> summary_granule_shift, range.end >> summary_granule_shift};
 	}
 
-	void ownership_directory::add_owner(u32 granule) noexcept
+	void ownership_directory::add_owner(u32 granule, bool nontexture) noexcept
 	{
-		auto& counter = m_no_access_owner_counts[granule];
+		auto& counter = nontexture
+			? m_nontexture_no_access_owner_counts[granule]
+			: m_no_access_owner_counts[granule];
 		const u16 previous = counter.load(std::memory_order_relaxed);
 		if (previous >= poisoned_owner_count - 1)
 		{
@@ -108,9 +134,11 @@ namespace rsx::cell_access
 		counter.store(previous + 1, std::memory_order_relaxed);
 	}
 
-	void ownership_directory::remove_owner(u32 granule) noexcept
+	void ownership_directory::remove_owner(u32 granule, bool nontexture) noexcept
 	{
-		auto& counter = m_no_access_owner_counts[granule];
+		auto& counter = nontexture
+			? m_nontexture_no_access_owner_counts[granule]
+			: m_no_access_owner_counts[granule];
 		const u16 previous = counter.load(std::memory_order_relaxed);
 		if (previous == poisoned_owner_count)
 		{
@@ -128,7 +156,7 @@ namespace rsx::cell_access
 	}
 
 	void ownership_directory::apply_transition(const utils::address_range32& old_range, bool old_no_access,
-		const utils::address_range32& new_range, bool new_no_access) noexcept
+		const utils::address_range32& new_range, bool new_no_access, bool nontexture) noexcept
 	{
 		u32 old_first = 1;
 		u32 old_last = 0;
@@ -151,7 +179,7 @@ namespace rsx::cell_access
 			{
 				if (!old_no_access || granule < old_first || granule > old_last)
 				{
-					add_owner(granule);
+					add_owner(granule, nontexture);
 				}
 			}
 		}
@@ -162,10 +190,130 @@ namespace rsx::cell_access
 			{
 				if (!new_no_access || granule < new_first || granule > new_last)
 				{
-					remove_owner(granule);
+					remove_owner(granule, nontexture);
 				}
 			}
 		}
+	}
+
+	bool ownership_directory::handoff_nontexture_to_texture(const utils::address_range32& nontexture_range,
+		const utils::address_range32& exact_texture_range) noexcept
+	{
+		ensure(nontexture_range.valid());
+		std::unique_lock lock(m_writer_mutex);
+		const u64 previous = m_sequence.fetch_add(1, std::memory_order_acq_rel);
+		if (previous & 1)
+		{
+			m_globally_poisoned.store(true, std::memory_order_relaxed);
+			m_sequence_errors.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		const auto [first, last] = granule_span(nontexture_range);
+		bool covered = exact_texture_range.valid() && nontexture_range.inside(exact_texture_range);
+		for (u32 granule = first; granule <= last; granule++)
+		{
+			const u16 texture = m_no_access_owner_counts[granule].load(std::memory_order_relaxed);
+			const u16 external = m_nontexture_no_access_owner_counts[granule].load(std::memory_order_relaxed);
+			if (!covered || !texture || texture == poisoned_owner_count || !external || external == poisoned_owner_count)
+			{
+				covered = false;
+				break;
+			}
+		}
+
+		if (covered)
+		{
+			for (u32 granule = first; granule <= last; granule++)
+			{
+				remove_owner(granule, true);
+			}
+		}
+		else
+		{
+			// The physical protection has no complete logical successor. Retain the
+			// conservative external owner and force all future behavioral users to fall back.
+			m_globally_poisoned.store(true, std::memory_order_relaxed);
+		}
+
+		finish_mutation();
+		return covered;
+	}
+
+	u64 ownership_directory::begin_renderer_lifetime_quiescent() noexcept
+	{
+		std::unique_lock lock(m_writer_mutex);
+		const u64 previous = m_sequence.fetch_add(1, std::memory_order_acq_rel);
+		if (previous & 1)
+		{
+			m_sequence_errors.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		for (auto& count : m_no_access_owner_counts)
+		{
+			count.store(0, std::memory_order_relaxed);
+		}
+		for (auto& count : m_nontexture_no_access_owner_counts)
+		{
+			count.store(0, std::memory_order_relaxed);
+		}
+
+		m_globally_poisoned.store(false, std::memory_order_relaxed);
+		u64 epoch = m_lifetime_epoch.load(std::memory_order_relaxed) + 1;
+		if (!epoch)
+		{
+			// Lifetime-token reuse is not recoverable. Keep the epoch invalid and
+			// permanently force future behavioral users onto the existing path.
+			m_globally_poisoned.store(true, std::memory_order_relaxed);
+			epoch = umax;
+		}
+		// Publish the cleared planes before allowing an out-of-lock epoch token
+		// observer to accept the new renderer lifetime.
+		m_lifetime_epoch.store(epoch, std::memory_order_release);
+		reset_validation();
+		finish_mutation();
+		return epoch;
+	}
+
+	stable_ownership_snapshot ownership_directory::probe_locked(u32 address, u32 size) const noexcept
+	{
+		stable_ownership_snapshot result{};
+		result.lifetime_epoch = m_lifetime_epoch.load(std::memory_order_relaxed);
+		if (!size || size > summary_granule_size)
+		{
+			return result;
+		}
+
+		const u64 end = static_cast<u64>(address) + size - 1;
+		if (end > u32{umax})
+		{
+			return result;
+		}
+
+		if (m_globally_poisoned.load(std::memory_order_relaxed))
+		{
+			result.texture = page_probe_result::poisoned;
+			return result;
+		}
+
+		result.texture = page_probe_result::clear;
+		const u32 first = address >> summary_granule_shift;
+		const u32 last = static_cast<u32>(end) >> summary_granule_shift;
+		for (u32 granule = first; granule <= last; granule++)
+		{
+			const u16 texture = m_no_access_owner_counts[granule].load(std::memory_order_relaxed);
+			const u16 external = m_nontexture_no_access_owner_counts[granule].load(std::memory_order_relaxed);
+			if (texture == poisoned_owner_count || external == poisoned_owner_count)
+			{
+				result.texture = page_probe_result::poisoned;
+				result.maybe_nontexture = true;
+				return result;
+			}
+
+			result.texture = texture ? page_probe_result::maybe_texture : result.texture;
+			result.maybe_nontexture |= external != 0;
+		}
+
+		return result;
 	}
 
 	void ownership_directory::finish_mutation() noexcept
@@ -412,8 +560,18 @@ namespace rsx::cell_access
 		return m_no_access_owner_counts[address >> summary_granule_shift].load(std::memory_order_relaxed);
 	}
 
+	u16 ownership_directory::nontexture_count_at(u32 address) const noexcept
+	{
+		return m_nontexture_no_access_owner_counts[address >> summary_granule_shift].load(std::memory_order_relaxed);
+	}
+
 	u64 ownership_directory::sequence() const noexcept
 	{
 		return m_sequence.load(std::memory_order_acquire);
+	}
+
+	u64 ownership_directory::lifetime_epoch() const noexcept
+	{
+		return m_lifetime_epoch.load(std::memory_order_acquire);
 	}
 }

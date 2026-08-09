@@ -65,6 +65,13 @@ namespace rsx::cell_access
 		directory_recount_result last_recount{};
 	};
 
+	struct stable_ownership_snapshot
+	{
+		page_probe_result texture = page_probe_result::invalid;
+		bool maybe_nontexture = false;
+		u64 lifetime_epoch = 0;
+	};
+
 	class ownership_directory
 	{
 	public:
@@ -74,9 +81,11 @@ namespace rsx::cell_access
 			std::unique_lock<std::mutex> m_lock;
 			utils::address_range32 m_old_range{};
 			bool m_old_no_access = false;
+			bool m_nontexture = false;
 			bool m_committed = false;
 
-			mutation(ownership_directory& owner, const utils::address_range32& old_range, bool old_no_access) noexcept;
+			mutation(ownership_directory& owner, const utils::address_range32& old_range,
+				bool old_no_access, bool nontexture) noexcept;
 			friend class ownership_directory;
 
 		public:
@@ -87,6 +96,23 @@ namespace rsx::cell_access
 			~mutation();
 
 			void commit(const utils::address_range32& new_range, bool new_no_access) noexcept;
+		};
+
+		class stable_session
+		{
+			ownership_directory* m_owner = nullptr;
+			std::unique_lock<std::mutex> m_lock;
+
+			explicit stable_session(ownership_directory& owner) noexcept;
+			friend class ownership_directory;
+
+		public:
+			stable_session(const stable_session&) = delete;
+			stable_session& operator=(const stable_session&) = delete;
+			stable_session(stable_session&&) = delete;
+			stable_session& operator=(stable_session&&) = delete;
+
+			stable_ownership_snapshot probe(u32 address, u32 size) const noexcept;
 		};
 
 		class recount_session
@@ -116,7 +142,21 @@ namespace rsx::cell_access
 		ownership_directory& operator=(const ownership_directory&) = delete;
 
 		mutation begin_mutation(const utils::address_range32& old_range, bool old_no_access) noexcept;
+		mutation begin_nontexture_mutation(const utils::address_range32& old_range, bool old_no_access) noexcept;
 		recount_session begin_recount() noexcept;
+		// Global lock order: renderer-lifetime shared lock, texture-cache or
+		// ZCULL pages lock, then this directory lock. This session is innermost:
+		// never acquire either source lock while it lives.
+		stable_session begin_stable_session() noexcept;
+
+		// Transfers a temporary physical NO-access owner to an already-published
+		// texture owner without exposing a stable owner-free interval.
+		bool handoff_nontexture_to_texture(const utils::address_range32& nontexture_range,
+			const utils::address_range32& exact_texture_range) noexcept;
+
+		// This is only valid before a newly constructed renderer begins backend
+		// initialization and before Cell execution can resume.
+		u64 begin_renderer_lifetime_quiescent() noexcept;
 
 		// Clear means only that no texture-cache NO-access owner is summarized for
 		// this range. It does not prove that VM, ZCULL, or another subsystem permits
@@ -130,12 +170,16 @@ namespace rsx::cell_access
 
 		// Test/validation accessors. They never control emulation behavior.
 		u16 count_at(u32 address) const noexcept;
+		u16 nontexture_count_at(u32 address) const noexcept;
 		u64 sequence() const noexcept;
+		u64 lifetime_epoch() const noexcept;
 
 	private:
 		std::array<std::atomic<u16>, summary_granule_count> m_no_access_owner_counts{};
+		std::array<std::atomic<u16>, summary_granule_count> m_nontexture_no_access_owner_counts{};
 		std::array<u16, summary_granule_count> m_recount_scratch{};
 		std::atomic<u64> m_sequence{0};
+		std::atomic<u64> m_lifetime_epoch{0};
 		std::atomic<bool> m_globally_poisoned{false};
 		std::mutex m_writer_mutex;
 
@@ -168,10 +212,11 @@ namespace rsx::cell_access
 
 		static std::pair<u32, u32> granule_span(const utils::address_range32& range) noexcept;
 		void apply_transition(const utils::address_range32& old_range, bool old_no_access,
-			const utils::address_range32& new_range, bool new_no_access) noexcept;
-		void add_owner(u32 granule) noexcept;
-		void remove_owner(u32 granule) noexcept;
+			const utils::address_range32& new_range, bool new_no_access, bool nontexture) noexcept;
+		void add_owner(u32 granule, bool nontexture) noexcept;
+		void remove_owner(u32 granule, bool nontexture) noexcept;
 		void finish_mutation() noexcept;
+		stable_ownership_snapshot probe_locked(u32 address, u32 size) const noexcept;
 		directory_recount_result finish_recount_locked(u64 sections, u64 expected_refs,
 			bool expected_overflow) noexcept;
 	};
