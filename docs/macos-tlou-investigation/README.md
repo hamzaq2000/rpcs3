@@ -58,8 +58,17 @@ Its valid 1,254-frame interior window then achieved 100% containing SPU MFC
 coverage with zero ring, site, section, pairing, or offloader loss. It exposed
 one 230,400-byte native-page collateral readback per frame and a 6.65-per-frame
 herd of already-synchronized GET faults responsible for 73.65% of flush wait.
-The current implementation target is therefore a generation-keyed exact GET
-ticket/shadow directory. More bedroom-only profiling is not the blocker.
+The first behavior-preserving part of that direction is implemented in
+`44f581fb1`: a fixed 16 KiB summary of texture-cache `NO` owners, maintained
+from the common buffered-section lifecycle and checked against an exact
+debug-only recount.
+Its stable probe is only a conservative negative hint about texture-cache
+ownership; it does not prove VM or ZCULL safety and does not pin a section or
+protection lifetime. Read-fault and recount telemetry can validate the summary,
+but no result currently changes emulation behavior. The next bounded step is
+one live proof run, followed—only if its gates pass—by the generation-keyed
+exact GET ticket/shadow mechanism. More bedroom-only attribution is not the
+blocker.
 
 The bedroom is a controlled microscope, not the optimization specification.
 Production decisions must be semantic—exact range, direction, ownership,

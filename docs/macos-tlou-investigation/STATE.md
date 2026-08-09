@@ -318,23 +318,45 @@ Do not launch RPCS3 in full-screen mode. Do not overwrite the installed
     of aggregate flush wait after the data are already synchronized. The
     detailed artifact boundary and architecture decision are in
     `FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`.
+36. Commit `44f581fb1` is a behavior-preserving Cell-access ownership-directory
+    checkpoint. It summarizes texture-cache `NO` owners in fixed 16 KiB
+    granules. Common buffered-section protect, confirmed-range protect, range
+    expansion, and discard transitions maintain conservative per-granule owner
+    counts. A stable probe is only a negative texture-owner hint: `clear` does not prove
+    that VM, ZCULL, or another subsystem permits access, and it neither pins a
+    section nor establishes a protection/lifetime epoch. With the debug overlay
+    enabled, read faults record summary/handler attribution and a cache-try-lock
+    exact recount runs at most every five seconds. `CELLDIR` reports recount
+    mismatches, missing/excess references, poison and mutation errors, cache-
+    busy skips, and total/maximum recount duration. The directory is not yet
+    consulted by MFC or any other behavioral path. Its eight focused tests pass;
+    all 206 enabled tests pass, with two existing tests disabled.
 
 ## Current blocker
 
-Oracle v2 is live-validated. The current blocker is implementing a
-game-general, generation-keyed exact GET ticket/shadow directory. It must
-separate exact logical ownership from macOS's 16 KiB trap granularity, retain a
-CPU-visible shadow keyed by RSX content/synchronization generation, and let
-subsequent same-generation GETs use exact bytes through the safe alias without
-another signal or flush-queue handoff. Same-page siblings remain owned and
-protected; epoch races, unsupported mappings, atomics, ZCULL, and ambiguous
-ownership fall back unchanged. The ordinary MFC negative path must remain a few
-allocation-free local loads.
+The behavior-neutral ownership summary needs one bounded live validation before
+it can support the exact GET ticket. Require at least one completed recount and
+zero mismatched granules, missing/excess references, poisoned granules, global
+poison, expected-count overflow, owner-count underflow/overflow, abandoned
+mutations, sequence errors, and inconclusive handled-fault probes.
+`handled_clear_n` is an attribution alarm requiring investigation, not by
+itself proof that the directory is corrupt: the read-fault callback can be
+handled by a source outside the texture-cache `NO`-owner model. Record
+`recount_busy_n` and recount total/maximum duration so a skipped cache try-lock
+or expensive scan is visible rather than mistaken for a correctness failure.
 
-Do not spend another iteration merely profiling the steady bedroom. Use it for
-focused functional and A/B validation after the prototype exists, then validate
-the semantic mechanism in distinct TLoU scenes. No production decision may key
-on the observed address, PC, section identity, cadence, or bedroom signature.
+If that run passes, implement the game-general, generation-keyed synchronous
+GET ticket/shadow path. Before the ownership summary controls behavior, add a
+quiescent reset that rebuilds or clears live state at a proven lifecycle
+boundary and add buffered-section integration tests covering real protection,
+range-expansion, and discard transitions. The behavioral path must resolve and
+pin exact owners under the correct cache lifetime, retain safe fallbacks for
+VM/ZCULL/unsupported cases, and keep the ordinary MFC negative path to a few
+allocation-free local loads. Use the bedroom for this bounded proof and later
+functional/A-B validation, then validate the semantic mechanism in distinct
+TLoU scenes. No production decision may key on an observed address, PC,
+section identity, cadence, or bedroom signature.
+
 Direct PPU JIT accesses still rely on host protection and remain a later
 producer-scheduled-shadow problem. Keep official 1280x720/100% settings and
 treat the removed historical WCB/WDB patch only as a canary. The v2 window's
@@ -373,10 +395,16 @@ would still leave about 6--7 ms/frame to reach 30 FPS.
 - Preserved valid `e0be35322` capture report in
   `FAULT_ORACLE_V2_CAPTURE_E0BE3532.md`; it closes every v2 gate and selects a
   generation-keyed exact GET ticket/shadow directory as the next implementation.
+- Behavior-preserving Cell-access ownership summary in `44f581fb1`: fixed
+  16 KiB conservative `NO`-owner counts maintained by common buffered-section
+  lifecycle hooks, stable read-fault attribution, and an exact five-second debug-only recount.
+  Busy-scan cadence and recount duration are explicit telemetry. It changes no
+  access decision and supplies neither VM/ZCULL safety nor a section lifetime
+  pin.
 
-All 198 enabled tests pass after oracle v2; two tests remain disabled in the
-existing suite. The 195-test result above belongs to the historical v1
-checkpoint.
+The ownership summary's eight focused tests and all 206 enabled tests pass;
+two existing tests remain disabled. The 198-test result above belongs to the
+oracle-v2 checkpoint; the 195-test result belongs to historical v1.
 
 The boot fix is preserved on branch `fix/macos-arm-spu-runtime`, commit
 `983c69d5e`, and pushed to `git@github.com:hamzaq2000/rpcs3.git`. The renderer

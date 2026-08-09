@@ -51,38 +51,49 @@ effective log configuration rather than only the intended YAML values.
 | First live fault-oracle capture (`f35963bea`) | 1,310 complete-bucket frames in 69.836 s: 18.758 FPS, p95 62.46 ms, maximum 107.54 ms. Zero ring drops; one PPU fault/frame, 11.77 SPU faults/frame, four fault-attached of six global readbacks/frame, and 99.98% of global readback-wait time attached. Signature overflow excluded 23.21% of events, MFC context covered only 25.42% of SPU faults with no GETs, and one multi-section event overflowed per frame | Aggregate scale keeps Cell/RSX coherence viable, but exact TOP/range percentages fail the oracle's own gates. Repair semantic aggregation, GET/raw-SPU attribution, and bounded multi-section capture before selecting policy. The bedroom is a microscope; production rules must be semantic and cross-scene validated |
 | Fault-attribution oracle v2 (`e0be35322`) | Added compiler signal fences so optimized list GETs retain asynchronous fault context; semantic 128-site aggregation; explicit normal/list/atomic/raw-proxy source; two ordinal-paired section/readback records; per-operation range validation; SPU-origin coverage gates; and exact untracked/overflow/pairing counters. Release+ThinLTO app linked and all 198 enabled tests passed | Behavior remains unchanged; ready for one bounded validation capture |
 | Valid oracle-v2 capture (`e0be35322`) | Full window: 1,276 periods/70.262005 s = 18.1606 FPS. Exact interior: 1,254 frames/69.051046 s; zero loss/overflow/mismatch/pairing/offloader gates and 14,615/14,615 containing SPU MFC contexts. Per frame: 1 PPU + 11.655 SPU faults, 4 fault-attached of 6 global readbacks, 14.990 ms aggregate flush wait, and 14.943 ms global readback wait. One 230,400-byte readback is native-page collateral; two semantic GET classes cause 6.65 no-readback faults/frame and 73.65% of flush wait | Oracle v2 is valid and the implementation gate is met. Build a generation-keyed exact GET ticket/shadow directory; do not continue bedroom-only profiling. True readbacks expose about 15 ms/frame, but 30 FPS would still need another 6--7 ms/frame. Production rules must be semantic and cross-scene validated |
+| Behavior-preserving Cell-access ownership summary (`44f581fb1`) | Fixed 16 KiB conservative counts track texture-cache `NO` owners through common buffered-section protect/expand/discard transitions. Stable read-fault probes, a cache-try-lock exact debug-only recount at five-second cadence, cache-busy count, and recount total/maximum duration are emitted in `CELLDIR`. Focused tests pass 8/8 and the full suite passes 206/206 enabled with two disabled | Proof checkpoint only: no emulation behavior changes. `clear` is only a negative texture-owner hint, not VM/ZCULL permission or a lifetime pin. Run one bounded live validation before implementing the synchronous GET ticket |
 
 ## Next experiments
 
-1. Implement a generation-keyed exact GET ticket/shadow directory. Publish
-   exact RSX-owned intervals and content/synchronization generations behind a
-   lifetime epoch; use the native 16 KiB summary only as a cheap negative hint.
-   Reuse a pinned CPU-visible shadow for same-generation GETs and synchronize
-   only exact intersecting owners when stale. Preserve the existing fallback
-   on every ambiguity.
-2. Add focused concurrency, lifetime, sibling-protection, list-GET, tag/barrier,
-   invalidation, and generation-wrap tests before launching the game. The common
-   negative path must remain allocation-free and a few local loads: millions of
-   ordinary MFC submissions per second cannot call unconditionally into RSX.
-3. Use the bedroom only to functionally validate the prototype and measure one
+1. Run one bounded debug-overlay live validation of the ownership summary.
+   Require at least one recount and zero mismatch, missing/excess references,
+   poison, expected-count overflow, owner underflow/overflow, abandoned
+   mutations, sequence errors, and handled-fault inconclusive results. Treat
+   `handled_clear_n` as an attribution alarm to explain, not automatic proof of
+   directory corruption. Record `recount_busy_n`, total recount time, and
+   maximum recount time.
+2. If the proof gates pass, implement a generation-keyed exact synchronous GET
+   ticket/shadow path. Publish exact RSX-owned intervals and
+   content/synchronization generations behind a lifetime epoch; use the native
+   16 KiB summary only as a cheap negative texture-owner hint. Reuse a pinned
+   CPU-visible shadow for same-generation GETs and synchronize only exact
+   intersecting owners when stale. Preserve the existing fallback on every
+   ambiguity.
+3. Before behavioral use, add a quiescent directory reset/rebuild and focused
+   buffered-section integration tests in addition to concurrency, lifetime,
+   sibling-protection, list-GET, tag/barrier, invalidation, and generation-wrap
+   coverage. The common negative path must remain allocation-free and a few
+   local loads: millions of ordinary MFC submissions per second cannot call
+   unconditionally into RSX.
+4. Use the bedroom only to functionally validate the prototype and measure one
    overlay-off A/B. Require fewer handled GET faults and flush handoffs without
    moving the time into MFC/channel waits or introducing visual corruption.
    Then repeat the semantic mechanism in distinct gameplay scenes before making
    a general performance claim. Never key production behavior on an address,
    PC, section identity, cadence, or bedroom signature.
-4. If the exact synchronous ticket removes handoffs but true readbacks remain
+5. If the exact synchronous ticket removes handoffs but true readbacks remain
    serialized, extend only the proven slow path into a generation-coalescing
    asynchronous MFC broker while preserving tag, barrier, local-store, atomic,
    pause, and shutdown semantics.
-5. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
+6. Audit a snapshot-free Vulkan path for the dominant full-screen live-feedback
    draws: ping-pong attachments first, then a narrowly proven same-pixel
    interlock/framebuffer-fetch path if the shaders qualify. Before changing
    rendering, record shader/primitive/blend/depth state and prove full overwrite
    rather than relying on full scissor alone.
-6. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
+7. Run long, thermally conditioned A-B-B-A windows at NI=0 with debug overlay
    off. Use `hom-const` as the scene trigger and packageId=0x202 as the frame
    proxy; keep audio device and window visibility stable.
-7. Only after the supported renderer path is measured, isolate-test the removed
+8. Only after the supported renderer path is measured, isolate-test the removed
    ten-write WCB/WDB performance patch; require exact patch-log verification and
    visual/depth regression coverage.
-8. Keep renderer and title-patch work separate from boot commit `983c69d5e`.
+9. Keep renderer and title-patch work separate from boot commit `983c69d5e`.

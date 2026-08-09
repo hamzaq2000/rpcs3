@@ -161,6 +161,47 @@ no additional bedroom-only attribution pass is required before phase 2.
 
 ## Phase 2: generation-keyed logical directory, shadow, and exact GET ticket
 
+### Behavior-preserving ownership-summary checkpoint
+
+Commit `44f581fb1`, the first phase-2 checkpoint, deliberately stops before
+changing an access decision. It maintains a fixed 16 KiB conservative count of
+texture-cache sections whose buffered-section protection is `NO`. Updates are
+centralized in the common protect, confirmed-range protect, range-expansion, and discard
+lifecycle, rather than duplicated in Vulkan and OpenGL paths. A stable probe
+requires only one or two granule loads for an MFC-sized range.
+
+This summary has a narrow meaning. `clear` says only that no texture-cache
+`NO` owner is summarized for the requested range. It does not establish VM or
+ZCULL permission, prove that no other native protection source exists, pin a
+texture section, or bind the result to a physical-protection/lifetime epoch.
+The current checkpoint is therefore validation-only and changes no emulation
+behavior.
+
+When the debug overlay is enabled, the existing common read-fault path records
+whether a stable probe was maybe/clear/inconclusive and whether the texture
+cache handled the fault. At most every five seconds, frame end tries to take a
+shared cache lock without blocking, enumerates the exact live `NO` sections,
+and compares their expected granule reference counts with the summary while
+directory mutation is excluded. `CELLDIR` exposes completed and mismatching
+recounts, missing/excess references, poisoned granules and global poison,
+expected-count overflow, mutation underflow/overflow, abandoned mutations,
+sequence errors, cache-busy skips, and total/maximum recount duration.
+
+The live proof gate is at least one completed recount and zero mismatch,
+missing/excess references, poison, expected-count overflow, owner
+underflow/overflow, abandoned mutations, sequence errors, and handled-fault
+inconclusive results. A nonzero `handled_clear_n` is an attribution alarm to
+explain, not automatically directory corruption, because the callback can
+handle protection sources outside this texture-owner summary. A nonzero
+`recount_busy_n` records a skipped try-lock; it is useful cadence evidence and
+does not itself fail correctness.
+
+Eight focused directory tests and all 206 enabled tests pass; two existing
+tests remain disabled. Before this summary controls behavior, it still requires
+a quiescent reset/rebuild at a proven lifecycle boundary and buffered-section
+integration tests that exercise real protect, range expansion, and discard
+transitions.
+
 Separate logical ownership and synchronized content state from trap
 granularity:
 
@@ -199,9 +240,11 @@ Raw-SPU MMIO, ZCULL, ambiguous ownership, and unsupported mappings retain the
 existing behavior until separately proven. MFC tag and barrier completion must
 remain observationally identical.
 
-Focused tests must cover lifetime races, sibling protection, invalidation,
-generation wrap, list elements, and MFC ordering before a game launch. The
-synchronous ticket is an enabling prototype. Continue only if it materially
+Focused tests must cover buffered-section lifecycle integration, lifetime
+races, sibling protection, invalidation, generation wrap, list elements, and
+MFC ordering before a behavioral game launch. A quiescent reset/rebuild must
+also prevent stale counts from crossing renderer lifetimes. The synchronous
+ticket is an enabling prototype. Continue only if it materially
 reduces handled GET faults and flush handoffs without moving the same cost into
 channel/MFC waits. Bedroom validation is followed by distinct gameplay scenes;
 a bedroom-only win is rejected.
