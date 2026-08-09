@@ -3,6 +3,7 @@
 #include "RSXCoherenceStats.h"
 
 #include "Capture/rsx_capture.h"
+#include "Common/cell_access_coherence.h"
 #include "Common/surface_store.h"
 #include "Core/RSXReservationLock.hpp"
 #include "Core/RSXEngLock.hpp"
@@ -941,6 +942,7 @@ namespace rsx
 		: cpu_thread(0x5555'5555)
 	{
 		coherence_stats::reset();
+		cell_access::g_ownership_directory.reset_validation();
 		coherence_stats::set_enabled(!!g_cfg.video.debug_overlay);
 
 		g_access_violation_handler = [this](u32 address, bool is_writing, const access_violation_info& info)
@@ -3655,6 +3657,23 @@ namespace rsx
 					stats.gpu_readback_wait.count, to_us(stats.gpu_readback_wait),
 					stats.gpu_readback_bytes,
 					stats.spu_channel_wait.count, to_us(stats.spu_channel_wait));
+
+				const auto ownership = cell_access::g_ownership_directory.validation_snapshot();
+				const auto& recount = ownership.last_recount;
+				perf_log.notice("CELLDIR v=1 read_probe_n=%llu read_handled_n=%llu handled_maybe_n=%llu handled_clear_n=%llu handled_inconclusive_n=%llu unhandled_maybe_n=%llu recount_n=%llu recount_mismatch_n=%llu recount_busy_n=%llu recount_us=%llu recount_max_us=%llu underflow_n=%llu overflow_n=%llu abandoned_n=%llu sequence_error_n=%llu seq=%llu sections=%llu expected_refs=%llu observed_refs=%llu missing_refs=%llu excess_refs=%llu expected_granules=%u observed_granules=%u mismatch_granules=%u poisoned_granules=%u global_poison=%u expected_overflow=%u",
+					ownership.read_fault_probes, ownership.read_faults_handled,
+					ownership.handled_maybe_texture, ownership.handled_clear,
+					ownership.handled_inconclusive, ownership.unhandled_maybe_texture,
+					ownership.recounts, ownership.recounts_with_mismatch,
+					ownership.recount_cache_busy, ownership.recount_total_us,
+					ownership.recount_max_us,
+					ownership.underflows, ownership.overflows,
+					ownership.abandoned_mutations, ownership.sequence_errors,
+					recount.sequence, recount.sections, recount.expected_refs,
+					recount.observed_refs, recount.missing_refs, recount.excess_refs,
+					recount.expected_granules, recount.observed_granules,
+					recount.mismatched_granules, recount.poisoned_granules,
+					ownership.globally_poisoned, recount.expected_overflow);
 
 				constexpr usz signature_capacity = 128;
 				std::array<cellfault_signature, signature_capacity> signatures{};

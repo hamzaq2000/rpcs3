@@ -2,12 +2,15 @@
 
 #include "Emu/RSX/Common/simple_array.hpp"
 #include "Emu/RSX/Core/RSXContext.h"
+#include "Emu/RSX/RSXCoherenceStats.h"
 #include "Emu/RSX/RSXThread.h"
+#include "cell_access_coherence.h"
 #include "texture_cache_utils.h"
 #include "texture_cache_predictor.h"
 #include "texture_cache_helpers.h"
 
 #include <array>
+#include <shared_mutex>
 #include <unordered_map>
 
 #define RSX_GCM_FORMAT_IGNORED 0
@@ -515,6 +518,7 @@ namespace rsx
 		framebuffer_feedback_copy_statistics m_feedback_copy_stats{};
 		framebuffer_feedback_copy_statistics m_feedback_copy_totals{};
 		u64 m_feedback_stats_frame_count = 0;
+		u64 m_last_cell_access_recount_time = 0;
 
 		static constexpr usz m_feedback_copy_signature_capacity = 24;
 		static constexpr usz m_feedback_copy_signature_report_count = 8;
@@ -1756,6 +1760,38 @@ namespace rsx
 			m_predictor.clear();
 		}
 
+		bool validate_cell_access_directory()
+		{
+			const u64 start_time = get_system_time();
+			std::shared_lock<shared_mutex> cache_lock(m_cache_mutex, std::try_to_lock);
+			if (!cache_lock.owns_lock())
+			{
+				cell_access::g_ownership_directory.record_recount_cache_busy();
+				return false;
+			}
+
+			auto recount = cell_access::g_ownership_directory.begin_recount();
+
+			// Iterate each block's owned sections only. Cross-block "unowned"
+			// references deliberately are not traversed, or they would double-count.
+			for (const auto& block : m_storage)
+			{
+				for (const auto& section : block)
+				{
+					if (!section.valid_range() || section.get_protection() != utils::protection::no)
+					{
+						continue;
+					}
+
+					recount.add(section.get_locked_range());
+				}
+			}
+
+			recount.finish();
+			cell_access::g_ownership_directory.record_recount_duration(get_system_time() - start_time);
+			return true;
+		}
+
 		virtual void on_frame_end()
 		{
 			// Capture scalar metadata while the current-frame descriptors still exist.
@@ -1839,6 +1875,15 @@ namespace rsx
 			if (g_cfg.video.debug_overlay)
 			{
 				report_feedback_copy_signatures();
+
+				const u64 now = get_system_time();
+				if (!m_last_cell_access_recount_time || now - m_last_cell_access_recount_time >= 5'000'000)
+				{
+					if (validate_cell_access_directory())
+					{
+						m_last_cell_access_recount_time = get_system_time();
+					}
+				}
 			}
 
 			reset_frame_statistics();
@@ -2181,7 +2226,23 @@ namespace rsx
 				return{};
 
 			std::lock_guard lock(m_cache_mutex);
-			return invalidate_range_impl_base(cmd, range, cause, on_data_transfer_completed, std::forward<Args>(extras)...);
+			const bool validate_read_fault = coherence_stats::is_enabled() && cause.is_read();
+			const auto ownership_probe = validate_read_fault
+				? cell_access::g_ownership_directory.probe(address, 1)
+				: cell_access::page_probe_result::invalid;
+			auto result = invalidate_range_impl_base(cmd, range, cause, on_data_transfer_completed, std::forward<Args>(extras)...);
+
+			if (validate_read_fault)
+			{
+				// Current NO-owner additions use this cache lock, so a stable clear
+				// cannot race one of those additions. A handled clear is still only an
+				// attribution alarm: invalidation chains can select outside the probed
+				// summary granule and need exact range evidence before diagnosis.
+				cell_access::g_ownership_directory.record_read_fault_probe(
+					ownership_probe, result.violation_handled);
+			}
+
+			return result;
 		}
 
 		template <typename ...Args>

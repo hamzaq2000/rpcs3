@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "cell_access_coherence.h"
 #include "texture_cache_utils.h"
 #include "Utilities/address_range.h"
 #include "util/fnv_hash.hpp"
@@ -48,6 +49,21 @@ namespace rsx
 	void buffered_section::protect(utils::protection new_prot, bool force)
 	{
 		if (new_prot == protection && !force) return;
+		if (protection != utils::protection::no && new_prot != utils::protection::no)
+		{
+			protect_impl(new_prot, force);
+			return;
+		}
+
+		auto mutation = cell_access::g_ownership_directory.begin_mutation(
+			locked_range, protection == utils::protection::no);
+		protect_impl(new_prot, force);
+		mutation.commit(locked_range, protection == utils::protection::no);
+	}
+
+	void buffered_section::protect_impl(utils::protection new_prot, bool force)
+	{
+		if (new_prot == protection && !force) return;
 
 		ensure(locked_range.is_page_range());
 		AUDIT(!confirmed_range.valid() || confirmed_range.inside(cpu_range));
@@ -89,9 +105,22 @@ namespace rsx
 
 	void buffered_section::protect(utils::protection prot, const std::pair<u32, u32>& new_confirm)
 	{
+		if (protection != utils::protection::no && prot != utils::protection::no)
+		{
+			protect_confirm_impl(prot, new_confirm);
+			return;
+		}
+
+		auto mutation = cell_access::g_ownership_directory.begin_mutation(
+			locked_range, protection == utils::protection::no);
+		protect_confirm_impl(prot, new_confirm);
+		mutation.commit(locked_range, protection == utils::protection::no);
+	}
+
+	void buffered_section::protect_confirm_impl(utils::protection prot, const std::pair<u32, u32>& new_confirm)
+	{
 		// new_confirm.first is an offset after cpu_range.start
 		// new_confirm.second is the length (after cpu_range.start + new_confirm.first)
-
 #ifdef TEXTURE_CACHE_DEBUG
 		// We need to remove the lockable range from page_info as we will be re-protecting with force==true
 		if (locked)
@@ -118,7 +147,7 @@ namespace rsx
 			init_lockable_range(confirmed_range);
 		}
 
-		protect(prot, confirmed_range != prev_confirmed_range);
+		protect_impl(prot, confirmed_range != prev_confirmed_range);
 	}
 
 	void buffered_section::unprotect()
@@ -128,6 +157,20 @@ namespace rsx
 	}
 
 	void buffered_section::discard()
+	{
+		if (protection != utils::protection::no)
+		{
+			discard_impl();
+			return;
+		}
+
+		auto mutation = cell_access::g_ownership_directory.begin_mutation(
+			locked_range, true);
+		discard_impl();
+		mutation.commit(locked_range, false);
+	}
+
+	void buffered_section::discard_impl()
 	{
 #ifdef TEXTURE_CACHE_DEBUG
 		if (locked)

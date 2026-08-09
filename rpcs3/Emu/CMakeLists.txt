@@ -490,6 +490,7 @@ target_sources(rpcs3_emu PRIVATE
     RSX/Common/BufferUtils.cpp
     RSX/Common/surface_store.cpp
     RSX/Common/TextureUtils.cpp
+    RSX/Common/cell_access_coherence.cpp
     RSX/Common/texture_cache.cpp
     RSX/Common/texture_cache_types.cpp
     RSX/Core/RSXContext.cpp

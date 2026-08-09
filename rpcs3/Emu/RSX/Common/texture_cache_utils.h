@@ -892,6 +892,9 @@ namespace rsx
 
 		bool locked = false;
 		void init_lockable_range(const address_range32& range);
+		void protect_impl(utils::protection new_prot, bool force);
+		void protect_confirm_impl(utils::protection prot, const std::pair<u32, u32>& new_confirm);
+		void discard_impl();
 		u64  fast_hash_internal() const;
 
 	public:

@@ -188,6 +188,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_tuple.cpp
             tests/test_simple_array.cpp
             tests/test_address_range.cpp
+            tests/test_cell_access_coherence.cpp
             tests/test_surface_content_tracker.cpp
             tests/test_sys_fs.cpp
             tests/test_rsx_cfg.cpp
