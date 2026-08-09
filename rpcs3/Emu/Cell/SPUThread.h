@@ -14,6 +14,7 @@
 
 #include "Loader/ELF.h"
 
+#include <atomic>
 #include <span>
 
 LOG_CHANNEL(spu_log, "SPU");
@@ -971,12 +972,11 @@ public:
 			return static_cast<std::conditional_t<std::is_void_v<Func>, Func, decltype(_this->group)>>(_this->group)->prio.atomic_op(std::move(func));
 		}
 	} prio{ this };
-};
 
-// Attempts a synchronous GET from Cell backing that a renderer has explicitly
-// certified as current. Returns false without modifying dst on any ambiguity.
-bool spu_is_ready_cell_backing_range_eligible(u32 eal, u32 size) noexcept;
-bool spu_try_read_ready_cell_backing(spu_thread* spu, u32 eal, u8* dst, u32 size);
+	// Diagnostic identity for host-side observers whose TLS can outlive a guest
+	// SPU lifecycle while the spu_thread allocation itself is reused.
+	std::atomic<u64> mfc_slack_lifecycle_generation{0};
+};
 
 class spu_function_logger
 {

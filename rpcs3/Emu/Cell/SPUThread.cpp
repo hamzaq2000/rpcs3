@@ -4,7 +4,6 @@
 #include "Emu/Memory/vm.h"
 #include "Emu/Memory/vm_ptr.h"
 #include "Emu/Memory/vm_reservation.h"
-#include "Emu/Memory/vm_locking.h"
 
 #include "Loader/ELF.h"
 #include "Emu/VFS.h"
@@ -22,12 +21,11 @@
 #include "Emu/Cell/SPUAnalyser.h"
 #include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/SPURecompiler.h"
+#include "Emu/Cell/SPUMfcSlackOracle.h"
 #include "Emu/Cell/timers.hpp"
 
 #include "Emu/RSX/Core/RSXReservationLock.hpp"
-#include "Emu/RSX/Common/cell_access_coherence.h"
 #include "Emu/RSX/RSXCoherenceStats.h"
-#include "Emu/RSX/RSXThread.h"
 
 #include <cmath>
 #include <cfenv>
@@ -1321,6 +1319,8 @@ void spu_thread::cpu_on_stop()
 
 void spu_thread::cpu_init()
 {
+	mfc_slack_lifecycle_generation.fetch_add(1, std::memory_order_relaxed);
+
 	std::memset(gpr.data(), 0, gpr.size() * sizeof(gpr[0]));
 	fpscr.Reset();
 
@@ -2042,60 +2042,6 @@ void spu_thread::push_snr(u32 number, u32 value)
 	});
 }
 
-bool spu_is_ready_cell_backing_range_eligible(u32 eal, u32 size) noexcept
-{
-	if (!size || size > 0x4000 || eal >= RAW_SPU_BASE_ADDR ||
-		(eal >> 28) == (rsx::constants::local_mem_base >> 28))
-	{
-		return false;
-	}
-
-	const u64 end = u64{eal} + size - 1;
-	return end <= 0xffff'ffffull && (eal >> 16) == (end >> 16);
-}
-
-bool spu_try_read_ready_cell_backing(spu_thread* spu, u32 eal, u8* dst, u32 size)
-{
-	using rsx::cell_access::page_probe_result;
-	using rsx::cell_access::ready_get_result;
-
-	if (!spu || !dst ||
-		g_cfg.core.spu_accurate_dma || g_cfg.core.mfc_debug ||
-		!spu_is_ready_cell_backing_range_eligible(eal, size))
-	{
-		return false;
-	}
-
-	if (rsx::cell_access::g_ownership_directory.probe(eal, size) != page_probe_result::maybe_texture ||
-		!vm::check_addr(eal, vm::page_readable, size))
-	{
-		return false;
-	}
-
-	vm::range_lock(spu->range_lock, eal, size);
-	struct range_unlocker
-	{
-		atomic_t<u64, 128>* lock;
-		~range_unlocker() { lock->release(0); }
-	} range_guard{spu->range_lock};
-
-	ready_get_result result = ready_get_result::fallback_no_renderer;
-	{
-		auto lifetime = rsx::cell_access::g_ownership_directory.begin_renderer_lifetime_session();
-		if (auto* renderer = lifetime.renderer())
-		{
-			result = renderer->try_read_ready_cell_backing(eal, size, dst, lifetime.epoch());
-		}
-	}
-
-	if (rsx::coherence_stats::is_enabled())
-	{
-		rsx::cell_access::g_ownership_directory.record_ready_get_result(result);
-	}
-
-	return result == ready_get_result::hit_backing_receipt;
-}
-
 void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8* ls, bool is_list)
 {
 	perf_meter<"DMA"_u32> perf_;
@@ -2201,11 +2147,6 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 	if (_this)
 	{
 		_this->last_faddr = 0;
-	}
-
-	if (is_get && spu_try_read_ready_cell_backing(_this, eal, dst, args.size))
-	{
-		return;
 	}
 
 	// It is so rare that optimizations are not implemented (TODO)
@@ -2901,6 +2842,8 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 {
 	perf_meter<"MFC_LIST"_u64> perf0;
 	const bool cellstat_enabled = rsx::coherence_stats::is_enabled();
+	spu_mfc_slack::scoped_list_transfer mfc_slack_scope(cellstat_enabled, *this, args,
+		&args == mfc_queue + mfc_size);
 
 	// Amount of elements to fetch in one go
 	constexpr u32 fetch_size = 6;
@@ -2983,13 +2926,9 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					// Type which is friendly for fused address calculations
 					constexpr usz _128 = 128;
 
-					bool ready_attempted[fetch_size]{};
-					bool ready_hit[fetch_size]{};
-
 					// This whole function relies on many constraints to be met (crashes real MFC), we can a have minor optimization assuming EA alignment to be +16 with +16 byte transfers
-#define TRY_READY_ITEM(item_index) (ready_attempted[item_index] ? ready_hit[item_index] : (ready_attempted[item_index] = true, ready_hit[item_index] = spu_try_read_ready_cell_backing(this, items[item_index].ea, dst + item_index * utils::align<u32>(s_size, 16) + (s_size < 16 ? items[item_index].ea % 16 : 0), s_size)))
-#define MOV_T(type, index, _ea) do { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); if (!TRY_READY_ITEM(index)) { *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } } while (0)
-#define MOV_128(dst_index, item_index, _source_ea) do { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); if (!TRY_READY_ITEM(item_index)) { mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } } while (0)
+#define MOV_T(type, index, _ea) { const usz ea = _ea; rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); *reinterpret_cast<type*>(dst + index * utils::align<u32>(sizeof(type), 16) + ea % (sizeof(type) < 16 ? 16 : 1)) = *reinterpret_cast<const type*>(src + ea); } void()
+#define MOV_128(dst_index, item_index, _source_ea) { rsx::coherence_stats::scoped_mfc_context cellstat_context(cellstat_enabled, id, items[item_index].ea, static_cast<u16>(s_size), transfer.cmd, transfer.tag, rsx::coherence_stats::mfc_context_get | rsx::coherence_stats::mfc_context_list, rsx::coherence_stats::mfc_context_source::list_fastpath); mov_rdata(*reinterpret_cast<decltype(rdata)*>(dst + dst_index * _128), *reinterpret_cast<const decltype(rdata)*>(src + (_source_ea))); } void()
 
 					switch (s_size)
 					{
@@ -3238,7 +3177,6 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 					}
 #undef MOV_T
 #undef MOV_128
-#undef TRY_READY_ITEM
 					// Optimization miss, revert changes
 					arg_lsa -= fetch_size * utils::align<u32>(s_size, 16);
 					item_ptr -= fetch_size;
@@ -3262,8 +3200,6 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 			const u8* src = vm::_ptr<u8>(addr);
 			u8* dst = this->ls + arg_lsa + (addr & 0xf);
 
-			if (!spu_try_read_ready_cell_backing(this, addr, dst, size))
-			{
 			switch (u32 _size = size)
 			{
 			case 1:
@@ -3324,7 +3260,6 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 				}
 
 				break;
-			}
 			}
 			}
 
@@ -3952,11 +3887,13 @@ bool spu_thread::do_mfc(bool can_escape, bool must_finish)
 			if (completed && ch_tag_upd == MFC_TAG_UPDATE_ANY)
 			{
 				ch_tag_stat.set_value(completed);
+				spu_mfc_slack::note_tag_publication(*this, ch_tag_upd, ch_tag_mask, completed);
 				ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			}
 			else if (completed == ch_tag_mask && ch_tag_upd == MFC_TAG_UPDATE_ALL)
 			{
 				ch_tag_stat.set_value(completed);
+				spu_mfc_slack::note_tag_publication(*this, ch_tag_upd, ch_tag_mask, completed);
 				ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			}
 		}
@@ -4341,6 +4278,7 @@ bool spu_thread::process_mfc_cmd()
 
 	spu::scheduler::concurrent_execution_watchdog watchdog(*this);
 	spu_log.trace("DMAC: (%s)", ch_mfc_cmd);
+	spu_mfc_slack::note_mfc_ordering_edge(*this, ch_mfc_cmd.cmd, ch_mfc_cmd.tag);
 
 	switch (ch_mfc_cmd.cmd)
 	{
@@ -5457,7 +5395,9 @@ u32 spu_thread::get_ch_count(u32 ch)
 	case SPU_WrOutMbox:       return ch_out_mbox.get_count() ^ 1;
 	case SPU_WrOutIntrMbox:   return ch_out_intr_mbox.get_count() ^ 1;
 	case SPU_RdInMbox:        return ch_in_mbox.get_count();
-	case MFC_RdTagStat:       return ch_tag_stat.get_count();
+	case MFC_RdTagStat:
+		spu_mfc_slack::note_rdtag_demand(*this);
+		return ch_tag_stat.get_count();
 	case MFC_RdListStallStat: return ch_stall_stat.get_count();
 	case MFC_WrTagUpdate:     return 1;
 	case SPU_RdSigNotify1:    return ch_snr1.get_count();
@@ -5573,6 +5513,8 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 	case MFC_RdTagStat:
 	{
+		spu_mfc_slack::note_rdtag_demand(*this);
+
 		if (state & cpu_flag::pending)
 		{
 			do_mfc();
@@ -5580,11 +5522,17 @@ s64 spu_thread::get_ch_value(u32 ch)
 
 		if (u32 out; ch_tag_stat.try_read(out))
 		{
+			spu_mfc_slack::note_rdtag_return(*this, out);
 			ch_tag_stat.set_value(0, false);
 			return out;
 		}
 
-		return read_channel(ch_tag_stat);
+		const s64 out = read_channel(ch_tag_stat);
+		if (out >= 0)
+		{
+			spu_mfc_slack::note_rdtag_return(*this, static_cast<u32>(out));
+		}
+		return out;
 	}
 
 	case MFC_RdTagMask:
@@ -6354,6 +6302,7 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 	case MFC_WrTagMask:
 	{
 		ch_tag_mask = value;
+		spu_mfc_slack::note_tag_mask(*this, value);
 
 		if (ch_tag_upd)
 		{
@@ -6362,11 +6311,13 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 			if (completed && ch_tag_upd == MFC_TAG_UPDATE_ANY)
 			{
 				ch_tag_stat.set_value(completed);
+				spu_mfc_slack::note_tag_publication(*this, ch_tag_upd, value, completed);
 				ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			}
 			else if (completed == value && ch_tag_upd == MFC_TAG_UPDATE_ALL)
 			{
 				ch_tag_stat.set_value(completed);
+				spu_mfc_slack::note_tag_publication(*this, ch_tag_upd, value, completed);
 				ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			}
 		}
@@ -6382,21 +6333,25 @@ bool spu_thread::set_ch_value(u32 ch, u32 value)
 		}
 
 		const u32 completed = get_mfc_completed();
+		spu_mfc_slack::note_tag_update(*this, value, ch_tag_mask);
 
 		if (!value)
 		{
 			ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			ch_tag_stat.set_value(completed);
+			spu_mfc_slack::note_tag_publication(*this, value, ch_tag_mask, completed);
 		}
 		else if (completed && value == MFC_TAG_UPDATE_ANY)
 		{
 			ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			ch_tag_stat.set_value(completed);
+			spu_mfc_slack::note_tag_publication(*this, value, ch_tag_mask, completed);
 		}
 		else if (completed == ch_tag_mask && value == MFC_TAG_UPDATE_ALL)
 		{
 			ch_tag_upd = MFC_TAG_UPDATE_IMMEDIATE;
 			ch_tag_stat.set_value(completed);
+			spu_mfc_slack::note_tag_publication(*this, value, ch_tag_mask, completed);
 		}
 		else
 		{

@@ -12,6 +12,7 @@
 #include "Utilities/JIT.h"
 
 #include "SPUThread.h"
+#include "SPUMfcSlackOracle.h"
 #include "SPUAnalyser.h"
 #include "SPUInterpreter.h"
 #include <algorithm>
@@ -4521,6 +4522,42 @@ public:
 		return static_cast<u32>(result & 0xffffffff);
 	}
 
+	static void exec_mfc_slack_tag_mask(spu_thread* _spu, u32 mask)
+	{
+		spu_mfc_slack::note_tag_mask(*_spu, mask);
+	}
+
+	static void exec_mfc_slack_tag_update(spu_thread* _spu, u32 mode, u32 mask)
+	{
+		if (mode <= MFC_TAG_UPDATE_ALL)
+		{
+			spu_mfc_slack::note_tag_update(*_spu, mode, mask);
+		}
+	}
+
+	static void exec_mfc_slack_tag_publication(spu_thread* _spu, u32 mode, u32 mask, u32 bits)
+	{
+		spu_mfc_slack::note_tag_publication(*_spu, mode, mask, bits);
+	}
+
+	static void exec_mfc_slack_rdtag_demand(spu_thread* _spu)
+	{
+		spu_mfc_slack::note_rdtag_demand(*_spu);
+	}
+
+	static void exec_mfc_slack_rdtag_fast_return(spu_thread* _spu, u32 bits, bool fast)
+	{
+		if (fast)
+		{
+			spu_mfc_slack::note_rdtag_return(*_spu, bits);
+		}
+	}
+
+	static void exec_mfc_slack_ordering_edge(spu_thread* _spu, u32 cmd, u32 tag)
+	{
+		spu_mfc_slack::note_mfc_ordering_edge(*_spu, static_cast<u8>(cmd), static_cast<u8>(tag));
+	}
+
 	static u32 exec_read_in_mbox(spu_thread* _spu)
 	{
 		// TODO
@@ -4557,8 +4594,13 @@ public:
 		}
 	}
 
-	llvm::Value* get_rdch(spu_opcode_t op, u32 off, bool atomic)
+	llvm::Value* get_rdch(spu_opcode_t op, u32 off, bool atomic, bool observe_mfc_tag = false)
 	{
+		if (observe_mfc_tag)
+		{
+			call("spu_mfc_slack_rdtag_demand", &exec_mfc_slack_rdtag_demand, m_thread);
+		}
+
 		const auto ptr = _ptr(m_thread, off);
 		llvm::Value* val0;
 
@@ -4589,6 +4631,13 @@ public:
 		const auto rval = m_ir->CreatePHI(get_type<u32>(), 2);
 		rval->addIncoming(val0, _cur);
 		rval->addIncoming(val1, wait);
+
+		if (observe_mfc_tag)
+		{
+			call("spu_mfc_slack_rdtag_fast_return", &exec_mfc_slack_rdtag_fast_return,
+				m_thread, rval, cond);
+		}
+
 		return rval;
 	}
 
@@ -4619,7 +4668,7 @@ public:
 		}
 		case MFC_RdTagStat:
 		{
-			res.value = get_rdch(op, ::offset32(&spu_thread::ch_tag_stat), false);
+			res.value = get_rdch(op, ::offset32(&spu_thread::ch_tag_stat), false, true);
 			break;
 		}
 		case MFC_RdTagMask:
@@ -4863,6 +4912,7 @@ public:
 		}
 		case MFC_RdTagStat:
 		{
+			call("spu_mfc_slack_rdtag_demand", &exec_mfc_slack_rdtag_demand, m_thread);
 			res.value = get_rchcnt(::offset32(&spu_thread::ch_tag_stat));
 			break;
 		}
@@ -5023,6 +5073,7 @@ public:
 		{
 			// TODO
 			m_ir->CreateStore(val.value, spu_ptr(&spu_thread::ch_tag_mask));
+			call("spu_mfc_slack_tag_mask", &exec_mfc_slack_tag_mask, m_thread, val.value);
 			const auto next = llvm::BasicBlock::Create(m_context, "", m_function);
 			const auto _mfc = llvm::BasicBlock::Create(m_context, "", m_function);
 			m_ir->CreateCondBr(m_ir->CreateICmpNE(m_ir->CreateLoad(get_type<u32>(), spu_ptr(&spu_thread::ch_tag_upd)), m_ir->getInt32(MFC_TAG_UPDATE_IMMEDIATE)), _mfc, next);
@@ -5043,6 +5094,8 @@ public:
 				const auto upd_ptr   = spu_ptr(&spu_thread::ch_tag_upd);
 				const auto stat_ptr  = spu_ptr(&spu_thread::ch_tag_stat);
 				const auto stat_val  = m_ir->CreateOr(m_ir->CreateZExt(completed, get_type<u64>()), s64{smin});
+				call("spu_mfc_slack_tag_update", &exec_mfc_slack_tag_update,
+					m_thread, val.value, tag_mask);
 
 				const auto next = llvm::BasicBlock::Create(m_context, "", m_function);
 				const auto next0 = llvm::BasicBlock::Create(m_context, "", m_function);
@@ -5055,6 +5108,8 @@ public:
 				m_ir->SetInsertPoint(imm);
 				m_ir->CreateStore(val.value, upd_ptr);
 				m_ir->CreateStore(stat_val, stat_ptr);
+				call("spu_mfc_slack_tag_publication", &exec_mfc_slack_tag_publication,
+					m_thread, val.value, tag_mask, completed);
 				m_ir->CreateBr(next);
 				m_ir->SetInsertPoint(next0);
 				m_ir->CreateCondBr(m_ir->CreateICmpULE(val.value, m_ir->getInt32(MFC_TAG_UPDATE_ALL)), any, fail, m_md_likely);
@@ -5073,6 +5128,8 @@ public:
 				m_ir->CreateCondBr(cond, update, next, m_md_likely);
 				m_ir->SetInsertPoint(update);
 				m_ir->CreateStore(stat_val, stat_ptr);
+				call("spu_mfc_slack_tag_publication", &exec_mfc_slack_tag_publication,
+					m_thread, val.value, tag_mask, completed);
 				m_ir->CreateBr(next);
 				m_ir->SetInsertPoint(next);
 			}
@@ -5144,6 +5201,9 @@ public:
 
 				const auto size = get_reg_fixed<u16>(s_reg_mfc_size);
 				const auto mask = m_ir->CreateShl(m_ir->getInt32(1), zext<u32>(tag).eval(m_ir));
+				const u32 observed_cmd = ci->getZExtValue();
+				call("spu_mfc_slack_ordering_edge", &exec_mfc_slack_ordering_edge,
+					m_thread, m_ir->getInt32(observed_cmd), zext<u32>(tag).eval(m_ir));
 				const auto exec = llvm::BasicBlock::Create(m_context, "", m_function);
 				const auto fail = llvm::BasicBlock::Create(m_context, "", m_function);
 				const auto next = llvm::BasicBlock::Create(m_context, "", m_function);
@@ -5258,17 +5318,6 @@ public:
 					m_ir->CreateBr(next);
 					m_ir->SetInsertPoint(copy);
 
-					llvm::BasicBlock* ready_copy_done = nullptr;
-					if (cmd & MFC_GET_CMD)
-					{
-						const auto regular_copy = llvm::BasicBlock::Create(m_context, "", m_function);
-						ready_copy_done = llvm::BasicBlock::Create(m_context, "", m_function);
-						const auto ready = call("spu_try_read_ready_cell_backing", &spu_try_read_ready_cell_backing,
-							m_thread, eal.value, dst, zext<u32>(size).eval(m_ir));
-						m_ir->CreateCondBr(ready, ready_copy_done, regular_copy, m_md_unlikely);
-						m_ir->SetInsertPoint(regular_copy);
-					}
-
 					llvm::Type* vtype = get_type<u8[16]>();
 
 					switch (csize)
@@ -5353,12 +5402,6 @@ public:
 							std::memcpy(dst, src, size);
 						};
 						call("spu_memcpy", +spu_memcpy, dst, src, zext<u32>(size).eval(m_ir));
-					}
-
-					if (ready_copy_done)
-					{
-						m_ir->CreateBr(ready_copy_done);
-						m_ir->SetInsertPoint(ready_copy_done);
 					}
 
 					// Disable certain thing

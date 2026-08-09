@@ -308,7 +308,6 @@ protected:
 	void notify_tile_unbound(u32 tile) override;
 
 	bool on_access_violation(u32 address, bool is_writing) override;
-	rsx::cell_access::ready_get_result try_read_ready_cell_backing(u32 address, u32 size, void* dst, u64 epoch) override;
 	void on_invalidate_memory_range(const utils::address_range32 &range, rsx::invalidation_cause cause) override;
 	void on_semaphore_acquire_wait() override;
 };

@@ -11,6 +11,11 @@
 
 namespace rsx::coherence_stats
 {
+	// Neutral CELLJOIN-to-MFC observer bridge. The implementation lives in the
+	// Cell observer so texture-cache code does not depend on SPU internals.
+	void note_mfc_slack_candidate(u64 serial, u16 member) noexcept;
+	void note_mfc_slack_enable_transition() noexcept;
+
 	// Apple silicon reports 128-byte data cache lines. Keep the hot enable flag
 	// and per-SPU MFC writers on distinct physical lines during this diagnostic.
 	constexpr usz coherence_cache_line_size = 128;
@@ -37,6 +42,7 @@ namespace rsx::coherence_stats
 		timed_counter renderer_fault_other;
 		timed_counter vk_fault_probe;
 		timed_counter vk_flush_wait;
+		timed_counter vk_flush_consumer_wait;
 		timed_counter gpu_event_wait;
 		timed_counter gpu_readback_wait;
 		std::atomic<u64> gpu_readback_bytes{0};
@@ -57,6 +63,7 @@ namespace rsx::coherence_stats
 	{
 		if (is_enabled() != enabled)
 		{
+			note_mfc_slack_enable_transition();
 			g_ledger.enabled.value.store(enabled, std::memory_order_relaxed);
 		}
 	}
@@ -249,6 +256,7 @@ namespace rsx::coherence_stats
 		u32 gpu_event_wait_count = 0;
 		u32 readback_wait_count = 0;
 		u32 readback_count = 0;
+		u32 transfer_count = 0;
 	};
 
 	static_assert(std::is_trivially_copyable_v<mfc_context>);
@@ -627,6 +635,7 @@ namespace rsx::coherence_stats
 		reset(g_ledger.renderer_fault_other);
 		reset(g_ledger.vk_fault_probe);
 		reset(g_ledger.vk_flush_wait);
+		reset(g_ledger.vk_flush_consumer_wait);
 		reset(g_ledger.gpu_event_wait);
 		reset(g_ledger.gpu_readback_wait);
 		g_ledger.gpu_readback_bytes.store(0, std::memory_order_relaxed);
@@ -724,6 +733,14 @@ namespace rsx::coherence_stats
 					observation.has_readback = true;
 				}
 			}
+		}
+	}
+
+	inline void record_transfer_sections(u32 count) noexcept
+	{
+		if (is_enabled() && g_active_fault_event)
+		{
+			g_active_fault_event->transfer_count += count;
 		}
 	}
 
@@ -834,6 +851,7 @@ namespace rsx::coherence_stats
 		timed_snapshot renderer_fault_other;
 		timed_snapshot vk_fault_probe;
 		timed_snapshot vk_flush_wait;
+		timed_snapshot vk_flush_consumer_wait;
 		timed_snapshot gpu_event_wait;
 		timed_snapshot gpu_readback_wait;
 		u64 gpu_readback_bytes;
@@ -858,6 +876,7 @@ namespace rsx::coherence_stats
 			read(g_ledger.renderer_fault_other),
 			read(g_ledger.vk_fault_probe),
 			read(g_ledger.vk_flush_wait),
+			read(g_ledger.vk_flush_consumer_wait),
 			read(g_ledger.gpu_event_wait),
 			read(g_ledger.gpu_readback_wait),
 			g_ledger.gpu_readback_bytes.load(std::memory_order_relaxed),

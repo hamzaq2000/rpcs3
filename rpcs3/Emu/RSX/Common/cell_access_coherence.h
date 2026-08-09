@@ -6,13 +6,7 @@
 #include <array>
 #include <atomic>
 #include <mutex>
-#include <shared_mutex>
 #include <utility>
-
-namespace rsx
-{
-	class thread;
-}
 
 namespace rsx::cell_access
 {
@@ -79,123 +73,357 @@ namespace rsx::cell_access
 		u64 lifetime_epoch = 0;
 	};
 
-	enum class ready_get_result : u8
+	// Debug-only description of one deferred read-fault invalidation plan. The
+	// fixed bounds are deliberate: the oracle must not allocate in a fault
+	// handler, and an over-capacity plan is simply reported as unobserved.
+	constexpr u32 exact_cohort_plan_capacity = 16;
+	constexpr u32 exact_cohort_slot_capacity = 64;
+	constexpr u32 exact_cohort_member_capacity = 64;
+	constexpr u32 exact_cohort_completion_capacity = 1024;
+	constexpr u32 exact_cohort_member_completion_capacity = 1024;
+	static_assert(exact_cohort_member_capacity <= 64,
+		"Exact-cohort member masks are u64");
+
+	enum class exact_cohort_section_role : u8
 	{
-		hit_backing_receipt,
-		fallback_no_renderer,
-		fallback_epoch,
-		fallback_nontexture,
-		fallback_no_native_sibling,
-		fallback_exact_owner,
-		fallback_no_receipt,
-		fallback_stale_generation,
-		fallback_ambiguous_receipt,
-		fallback_directory,
-		count,
+		flush,
+		unprotect,
+		exclude,
 	};
 
-	struct cell_backing_receipt
+	struct exact_cohort_section_token
 	{
-		utils::address_range32 range{};
+		u64 section_identity = 0;
+		u64 section_session_generation = 0;
+		u64 producer_identity = 0;
 		u64 content_generation = 0;
-		u64 lifetime_epoch = 0;
+		u64 staged_generation = 0;
+		u64 transfer_generation = 0;
+		u64 synchronization_generation = 0;
+		u64 write_generation = 0;
+		utils::address_range32 full_range{};
+		utils::address_range32 confirmed_range{};
+		utils::address_range32 locked_range{};
+		u32 context = 0;
+		u32 rsx_pitch = 0;
+		u32 gcm_format = 0;
+		u16 width = 0;
+		u16 height = 0;
+		u16 depth = 0;
+		u16 mipmaps = 0;
+		u8 protection = 0;
+		u8 read_flags = 0;
+		u8 synchronized = 0;
+		u8 raw_rank = 0;
+		u8 execution_rank = 0;
+		bool swizzled = false;
+		bool has_flush_exclusions = false;
+		exact_cohort_section_role role = exact_cohort_section_role::flush;
 
-		void clear() noexcept
+		bool operator ==(const exact_cohort_section_token&) const = default;
+	};
+
+	struct exact_cohort_plan
+	{
+		u64 renderer_epoch = 0;
+		u64 directory_sequence = 0;
+		u64 cache_revision = 0;
+		utils::address_range32 fault_range{};
+		utils::address_range32 invalidate_range{};
+		std::array<exact_cohort_section_token, exact_cohort_plan_capacity> sections{};
+		u8 section_count = 0;
+
+		bool same_semantic_plan(const exact_cohort_plan& other) const noexcept;
+		bool same_semantic_plan_except_cache_revision(const exact_cohort_plan& other) const noexcept;
+		bool same_native_cohort(const exact_cohort_plan& other) const noexcept;
+	};
+
+	// Captured from the faulting thread. Origin/MFC metadata deliberately does
+	// not participate in observational plan grouping: the records quantify
+	// whether a future broker can apply a stricter SPU-GET-only eligibility gate.
+	struct exact_cohort_member_observation
+	{
+		u64 frame = 0;
+		u64 fault_start_ticks = 0;
+		u64 fault_end_ticks = 0;
+		u64 flush_wait_start_ticks = 0;
+		u64 flush_wait_end_ticks = 0;
+		u64 readback_wait_start_ticks = 0;
+		u64 readback_wait_end_ticks = 0;
+		u64 readback_bytes = 0;
+		u64 submission_ready_us = 0;
+		u64 queue_ref_removed_us = 0;
+		u64 data_ready_us = 0;
+		u64 unprotect_done_us = 0;
+		u64 semantic_ready_us = 0;
+		u64 first_staged_completion_generation = 0;
+		u32 fault_address = 0;
+		u32 origin_id = 0;
+		u32 origin_guest_pc = 0;
+		u32 mfc_spu_id = 0;
+		u32 mfc_ea = 0;
+		u16 mfc_size = 0;
+		u32 flush_wait_count = 0;
+		u32 readback_wait_count = 0;
+		u32 readback_count = 0;
+		u32 transfer_count = 0;
+		u32 copied_start = umax;
+		u32 copied_end = 0;
+		u16 flush_sections = 0;
+		u16 unprotect_sections = 0;
+		u16 discarded_sections = 0;
+		u8 origin = 0;
+		u8 mfc_source = 0;
+		u8 mfc_cmd = 0;
+		u8 mfc_tag = 0;
+		u8 mfc_flags = 0;
+		u8 queue_posts = 0;
+		bool mfc_valid = false;
+		bool mfc_contains_fault = false;
+		bool replan_empty = false;
+		bool cache_unchanged = false;
+		bool semantic_plan_verified = false;
+		bool completion_verified = false;
+
+		bool is_spu_get() const noexcept;
+	};
+
+	enum class exact_cohort_terminal_kind : u8
+	{
+		success,
+		resolved_noop,
+		replan_mismatch,
+		offloader,
+		other_abandon,
+	};
+
+	struct exact_cohort_ticket
+	{
+		u64 serial = 0;
+		u16 slot = 0xffff;
+		u16 member = 0xffff;
+
+		bool valid() const noexcept
 		{
-			range.invalidate();
-			content_generation = 0;
-			lifetime_epoch = 0;
+			return serial && slot < exact_cohort_slot_capacity &&
+				member < exact_cohort_member_capacity;
 		}
 
-		void publish(const utils::address_range32& copied_range, u64 generation, u64 epoch) noexcept
+		bool is_proposed_leader() const noexcept
 		{
-			if (!copied_range.valid() || !generation || !epoch)
-			{
-				clear();
-				return;
-			}
-
-			range = copied_range;
-			content_generation = generation;
-			lifetime_epoch = epoch;
-		}
-
-		bool matches(const utils::address_range32& requested_range, u64 epoch) const noexcept
-		{
-			return range.valid() && content_generation && lifetime_epoch == epoch &&
-				requested_range.valid() && requested_range.inside(range);
-		}
-
-		bool matches_generation(u64 current_generation) const noexcept
-		{
-			return content_generation && content_generation == current_generation;
+			return valid() && member == 0;
 		}
 	};
 
-	// Pins intrusive RSX resources across ownership handoffs. Acquiring the new
-	// ref before releasing the old one prevents a same-resource lifetime gap.
-	template <typename Resource>
-	class intrusive_lifetime_pin
+	struct exact_cohort_snapshot
 	{
-		Resource* m_resource = nullptr;
+		u64 leaders = 0;
+		u64 same_plan_ranges_followers = 0;
+		u64 different_plan_ranges_followers = 0;
+		u64 cross_page_same_plan_pairs = 0;
+		u64 cross_page_followers_covered_by_leader = 0;
+		u64 cache_revision_splits = 0;
+		u64 materializers_published = 0;
+		u64 first_completion_with_readback = 0;
+		u64 first_completion_without_readback = 0;
+		u64 leader_completion_with_readback = 0;
+		u64 leader_completion_without_readback = 0;
+		u64 late_completion_with_readback = 0;
+		u64 late_completion_without_readback = 0;
+		u64 follower_arrival_us = 0;
+		u64 follower_arrival_max_us = 0;
+		u64 materializer_publish_latency_us = 0;
+		u64 materializer_publish_latency_max_us = 0;
+		u64 followers_at_materializer_publish = 0;
+		u64 max_followers_at_materializer_publish = 0;
+		u64 plan_overflow = 0;
+		u64 slot_exhaustion = 0;
+		u64 member_exhaustion = 0;
+		u64 unknown_generation_rejections = 0;
+		u64 flush_exclusion_rejections = 0;
+		u64 preplan_mutation_rejections = 0;
+		u64 invalid_directory_sequence = 0;
+		u64 invalid_range_rejections = 0;
+		u64 unsupported_backend = 0;
+		u64 abandoned = 0;
+		u64 replan_mismatches = 0;
+		u64 resolved_noops = 0;
+		u64 multiple_materializers = 0;
+		u64 offloader_abandons = 0;
+		u64 stale_completion = 0;
+		u64 timing_complete = 0;
+		u64 timing_with_any_readback = 0;
+		u64 timing_with_leader_readback = 0;
+		u64 timing_cross_page_complete = 0;
+		u64 projected_tail_us = 0;
+		u64 projected_tail_max_us = 0;
+		u64 queue_tail_us = 0;
+		u64 queue_tail_max_us = 0;
+		u64 spu_get_leaders = 0;
+		u64 spu_get_followers = 0;
+		u64 spu_get_queue_posts = 0;
+		u64 spu_get_follower_queue_posts = 0;
+		u64 homogeneous_spu_get_cohorts = 0;
+		u64 mixed_spu_get_cohorts = 0;
+		u64 completion_record_drops = 0;
+		u64 member_record_drops = 0;
+		u64 incomplete_queue_timing = 0;
+		u64 queue_timestamp_without_post = 0;
+		u32 active_slots = 0;
+		u32 occupied_slots = 0;
+	};
+
+	// A bounded completion record exposes intervals for an offline union. Tail
+	// durations must not be summed and presented as wall-time or FPS savings.
+	struct exact_cohort_completion
+	{
+		u64 serial = 0;
+		u64 renderer_epoch = 0;
+		u64 directory_sequence = 0;
+		u64 cache_revision = 0;
+		u64 started_us = 0;
+		u64 first_done_us = 0;
+		u64 materializer_data_ready_us = 0;
+		u64 materializer_semantic_ready_us = 0;
+		u64 proposed_leader_done_us = 0;
+		u64 last_member_done_us = 0;
+		u64 last_terminal_us = 0;
+		u64 first_readback_data_ready_us = 0;
+		u64 last_readback_data_ready_us = 0;
+		u64 projected_tail_us = 0;
+		u64 materializer_tail_us = 0;
+		u64 materializer_queue_release_us = 0;
+		u64 proposed_leader_queue_release_us = 0;
+		u64 last_queue_release_us = 0;
+		u64 queue_tail_us = 0;
+		u64 proposed_leader_queue_tail_us = 0;
+		u64 frame_min = 0;
+		u64 frame_max = 0;
+		u32 registrations = 0;
+		u32 successful_members = 0;
+		u32 resolved_noop_members = 0;
+		u32 abandoned_members = 0;
+		u32 queue_posts = 0;
+		u32 follower_queue_posts = 0;
+		u16 first_done_member = 0xffff;
+		u16 spu_get_members = 0;
+		u16 cross_page_members = 0;
+		utils::address_range32 fault_range{};
+		utils::address_range32 invalidate_range{};
+		utils::address_range32 materializer_fault_range{};
+		utils::address_range32 materializer_invalidate_range{};
+		u64 first_section_identity = 0;
+		u64 first_section_session_generation = 0;
+		u64 first_producer_identity = 0;
+		u64 first_content_generation = 0;
+		u8 section_count = 0;
+		bool first_done_had_readback = false;
+		bool proposed_leader_had_readback = false;
+		bool any_readback = false;
+		bool proposed_leader_materialized = false;
+		bool proposed_leader_covers_all_faults = false;
+		bool materializer_covers_all_faults = false;
+		bool proposed_leader_valid = false;
+		bool complete = false;
+	};
+
+	struct exact_cohort_member_completion
+	{
+		u64 serial = 0;
+		u64 done_us = 0;
+		u16 member = 0xffff;
+		exact_cohort_terminal_kind terminal = exact_cohort_terminal_kind::other_abandon;
+		bool first_successful_completion = false;
+		bool after_first_successful_completion = false;
+		bool after_proposed_leader_completion = false;
+		utils::address_range32 fault_range{};
+		utils::address_range32 invalidate_range{};
+		exact_cohort_member_observation observation{};
+	};
+
+	class exact_cohort_oracle
+	{
+		struct slot_state
+		{
+			exact_cohort_plan plan{};
+			u64 serial = 0;
+			u64 started_us = 0;
+			u64 first_done_us = 0;
+			u64 proposed_leader_done_us = 0;
+			u64 last_member_done_us = 0;
+			u64 last_terminal_us = 0;
+			u64 first_readback_data_ready_us = 0;
+			u64 last_readback_data_ready_us = 0;
+			u64 frame_min = 0;
+			u64 frame_max = 0;
+			u64 resolved_mask = 0;
+			u64 terminal_mask = 0;
+			u64 after_first_success_mask = 0;
+			u64 after_proposed_leader_mask = 0;
+			u32 registrations = 0;
+			u32 resolved_calls = 0;
+			u32 terminal_calls = 0;
+			u32 successful_calls = 0;
+			u32 resolved_noop_calls = 0;
+			u32 abandoned_calls = 0;
+			u16 first_done_member = 0xffff;
+			bool first_done_had_readback = false;
+			bool proposed_leader_had_readback = false;
+			bool any_readback = false;
+			bool occupied = false;
+			bool active = false;
+			std::array<exact_cohort_member_observation, exact_cohort_member_capacity> members{};
+			std::array<exact_cohort_terminal_kind, exact_cohort_member_capacity> terminals{};
+			std::array<utils::address_range32, exact_cohort_member_capacity> member_fault_ranges{};
+			std::array<utils::address_range32, exact_cohort_member_capacity> member_invalidate_ranges{};
+		};
+
+		mutable std::mutex m_mutex;
+		std::array<slot_state, exact_cohort_slot_capacity> m_slots{};
+		std::array<exact_cohort_completion, exact_cohort_completion_capacity> m_completions{};
+		std::array<exact_cohort_member_completion, exact_cohort_member_completion_capacity> m_member_completions{};
+		u32 m_completion_read = 0;
+		u32 m_completion_write = 0;
+		u32 m_completion_count = 0;
+		u32 m_member_completion_read = 0;
+		u32 m_member_completion_write = 0;
+		u32 m_member_completion_count = 0;
+		u64 m_next_serial = 1;
+		exact_cohort_snapshot m_totals{};
+
+		void finish_timing(slot_state& slot) noexcept;
+		void push_member_completion(const exact_cohort_member_completion& completion) noexcept;
 
 	public:
-		intrusive_lifetime_pin() = default;
-		intrusive_lifetime_pin(const intrusive_lifetime_pin&) = delete;
-		intrusive_lifetime_pin& operator=(const intrusive_lifetime_pin&) = delete;
-
-		~intrusive_lifetime_pin()
-		{
-			reset();
-		}
-
-		void reset(Resource* resource = nullptr) noexcept
-		{
-			if (resource == m_resource)
-			{
-				return;
-			}
-			if (resource)
-			{
-				resource->add_ref();
-			}
-
-			auto* previous = std::exchange(m_resource, resource);
-			if (previous)
-			{
-				previous->release();
-			}
-		}
-
-		Resource* get() const noexcept
-		{
-			return m_resource;
-		}
+		exact_cohort_ticket begin(const exact_cohort_plan& plan,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		bool resolve_semantic(exact_cohort_ticket ticket, exact_cohort_terminal_kind terminal,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		void finalize_member(exact_cohort_ticket ticket,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		void complete(exact_cohort_ticket ticket,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		void resolve_noop(exact_cohort_ticket ticket,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		void abandon(exact_cohort_ticket ticket, exact_cohort_terminal_kind reason,
+			const exact_cohort_member_observation& observation = {}) noexcept;
+		void record_plan_overflow() noexcept;
+		void record_preplan_mutation() noexcept;
+		void record_unsupported_backend() noexcept;
+		exact_cohort_snapshot snapshot() const noexcept;
+		bool try_pop_completion(exact_cohort_completion& result) noexcept;
+		bool try_pop_member_completion(exact_cohort_member_completion& result) noexcept;
+		bool matches_ticket_plan(exact_cohort_ticket ticket,
+			const exact_cohort_plan& plan) const noexcept;
+		void reset() noexcept;
 	};
+
+	extern exact_cohort_oracle g_exact_cohort_oracle;
+	u64 allocate_exact_cohort_session_generation() noexcept;
 
 	class ownership_directory
 	{
 	public:
-		class renderer_lifetime_session
-		{
-			ownership_directory* m_owner = nullptr;
-			std::shared_lock<std::shared_mutex> m_lock;
-			rsx::thread* m_renderer = nullptr;
-			u64 m_epoch = 0;
-
-			explicit renderer_lifetime_session(ownership_directory& owner) noexcept;
-			friend class ownership_directory;
-
-		public:
-			renderer_lifetime_session(const renderer_lifetime_session&) = delete;
-			renderer_lifetime_session& operator=(const renderer_lifetime_session&) = delete;
-			renderer_lifetime_session(renderer_lifetime_session&&) = delete;
-			renderer_lifetime_session& operator=(renderer_lifetime_session&&) = delete;
-
-			rsx::thread* renderer() const noexcept { return m_renderer; }
-			u64 epoch() const noexcept { return m_epoch; }
-		};
-
 		class mutation
 		{
 			ownership_directory* m_owner = nullptr;
@@ -234,6 +462,7 @@ namespace rsx::cell_access
 			stable_session& operator=(stable_session&&) = delete;
 
 			stable_ownership_snapshot probe(u32 address, u32 size) const noexcept;
+			u64 sequence() const noexcept;
 		};
 
 		class recount_session
@@ -265,13 +494,10 @@ namespace rsx::cell_access
 		mutation begin_mutation(const utils::address_range32& old_range, bool old_no_access) noexcept;
 		mutation begin_nontexture_mutation(const utils::address_range32& old_range, bool old_no_access) noexcept;
 		recount_session begin_recount() noexcept;
-		// Global lock order: renderer-lifetime shared lock, texture-cache or
-		// ZCULL pages lock, then this directory lock. This session is innermost:
+		// Global lock order: texture-cache or ZCULL pages lock, then this
+		// directory lock. This session is innermost:
 		// never acquire either source lock while it lives.
 		stable_session begin_stable_session() noexcept;
-		renderer_lifetime_session begin_renderer_lifetime_session() noexcept;
-		void publish_renderer_lifetime(rsx::thread* renderer) noexcept;
-		void unpublish_renderer_lifetime(rsx::thread* renderer) noexcept;
 
 		// Transfers a temporary physical NO-access owner to an already-published
 		// texture owner without exposing a stable owner-free interval.
@@ -297,8 +523,6 @@ namespace rsx::cell_access
 		u16 nontexture_count_at(u32 address) const noexcept;
 		u64 sequence() const noexcept;
 		u64 lifetime_epoch() const noexcept;
-		void record_ready_get_result(ready_get_result result) noexcept;
-		u64 ready_get_result_count(ready_get_result result) const noexcept;
 
 	private:
 		std::array<std::atomic<u16>, summary_granule_count> m_no_access_owner_counts{};
@@ -308,9 +532,6 @@ namespace rsx::cell_access
 		std::atomic<u64> m_lifetime_epoch{0};
 		std::atomic<bool> m_globally_poisoned{false};
 		std::mutex m_writer_mutex;
-		std::shared_mutex m_renderer_lifetime_mutex;
-		rsx::thread* m_renderer = nullptr;
-		std::array<std::atomic<u64>, static_cast<usz>(ready_get_result::count)> m_ready_get_results{};
 
 		std::atomic<u64> m_read_fault_probes{0};
 		std::atomic<u64> m_read_faults_handled{0};

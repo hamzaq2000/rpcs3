@@ -791,8 +791,6 @@ VKGSRender::VKGSRender(utils::serial* ar) noexcept : GSRender(ar)
 
 VKGSRender::~VKGSRender()
 {
-	rsx::cell_access::g_ownership_directory.unpublish_renderer_lifetime(this);
-
 	if (m_device == VK_NULL_HANDLE)
 	{
 		//Initialization failed
@@ -862,8 +860,8 @@ VKGSRender::~VKGSRender()
 	m_frame_context_storage.clear();
 
 	// Textures
-	m_texture_cache.destroy();
 	m_rtts.destroy();
+	m_texture_cache.destroy();
 
 	m_overlay_recording_img.reset();
 	m_stencil_mirror_sampler.reset();
@@ -906,6 +904,70 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 		const rsx::invalidation_cause cause = is_writing ? rsx::invalidation_cause::deferred_write : rsx::invalidation_cause::deferred_read;
 		result = m_texture_cache.invalidate_address(*m_secondary_cb_list.get(), address, cause);
 	}
+	const bool observe_exact_cohort = result.exact_cohort_ticket.valid();
+
+	auto make_exact_cohort_final_observation = [&]()
+	{
+		rsx::cell_access::exact_cohort_member_observation observation{};
+		observation.submission_ready_us = result.exact_cohort_submission_ready_us;
+		observation.queue_ref_removed_us = result.exact_cohort_queue_ref_removed_us;
+		observation.queue_posts = result.exact_cohort_queue_posts;
+		if (const auto* event = rsx::coherence_stats::g_active_fault_event)
+		{
+			observation.frame = event->frame;
+			observation.fault_start_ticks = event->timestamp_ticks;
+			observation.fault_end_ticks = utils::get_tsc();
+			observation.flush_wait_start_ticks = event->flush_wait_start;
+			observation.flush_wait_end_ticks = event->flush_wait_end;
+			observation.readback_wait_start_ticks = event->readback_wait_start;
+			observation.readback_wait_end_ticks = event->readback_wait_end;
+			observation.readback_bytes = event->readback_bytes;
+			observation.fault_address = event->fault_address;
+			observation.origin_id = event->origin_id;
+			observation.origin_guest_pc = event->origin_guest_pc;
+			observation.mfc_spu_id = event->mfc.spu_id;
+			observation.mfc_ea = event->mfc.ea;
+			observation.mfc_size = event->mfc.size;
+			observation.flush_wait_count = event->flush_wait_count;
+			observation.readback_wait_count = event->readback_wait_count;
+			observation.readback_count = event->readback_count;
+			observation.transfer_count = event->transfer_count;
+			observation.origin = static_cast<u8>(event->origin);
+			observation.mfc_source = static_cast<u8>(event->mfc.source);
+			observation.mfc_cmd = event->mfc.cmd;
+			observation.mfc_tag = event->mfc.tag;
+			observation.mfc_flags = event->mfc.flags;
+			observation.mfc_valid = event->mfc.valid;
+			observation.mfc_contains_fault = event->mfc_contains_fault;
+			if (event->readback_count)
+			{
+				observation.copied_start = event->readback_start;
+				observation.copied_end = event->readback_end;
+			}
+		}
+		return observation;
+	};
+
+	auto finalize_exact_cohort = [&](rsx::cell_access::exact_cohort_terminal_kind fallback)
+	{
+		if (!observe_exact_cohort)
+		{
+			return;
+		}
+
+		const auto observation = make_exact_cohort_final_observation();
+		if (!result.exact_cohort_semantic_resolved)
+		{
+			result.exact_cohort_semantic_resolved =
+				rsx::cell_access::g_exact_cohort_oracle.resolve_semantic(
+					result.exact_cohort_ticket, fallback, observation);
+		}
+		if (result.exact_cohort_semantic_resolved)
+		{
+			rsx::cell_access::g_exact_cohort_oracle.finalize_member(
+				result.exact_cohort_ticket, observation);
+		}
+	};
 
 	if (result.invalidate_samplers)
 	{
@@ -934,6 +996,14 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 			rsx::coherence_stats::mark_renderer_fault_path(rsx::coherence_stats::renderer_fault_path_offloader);
 			// The offloader thread cannot handle flush requests
 			ensure(!(m_queue_status & flush_queue_state::deadlock));
+			if (observe_exact_cohort)
+			{
+				result.exact_cohort_semantic_resolved =
+					rsx::cell_access::g_exact_cohort_oracle.resolve_semantic(
+						result.exact_cohort_ticket,
+						rsx::cell_access::exact_cohort_terminal_kind::offloader,
+						make_exact_cohort_final_observation());
+			}
 
 			m_offloader_fault_range = g_fxo->get<rsx::dma_manager>().get_fault_range(is_writing);
 			m_offloader_fault_cause = (is_writing) ? rsx::invalidation_cause::write : rsx::invalidation_cause::read;
@@ -949,11 +1019,25 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 			}
 
 			g_fxo->get<rsx::dma_manager>().clear_mem_fault_flag();
+			finalize_exact_cohort(rsx::cell_access::exact_cohort_terminal_kind::offloader);
 			return true;
 		}
 
 		bool has_queue_ref = false;
 		std::function<void()> data_transfer_completed_callback{};
+		auto release_queue_ref = [&]()
+		{
+			if (!has_queue_ref)
+			{
+				return;
+			}
+			m_flush_requests.remove_one();
+			if (observe_exact_cohort)
+			{
+				result.exact_cohort_queue_ref_removed_us = get_system_time();
+			}
+			has_queue_ref = false;
+		};
 
 		if (!is_current_thread()) [[likely]]
 		{
@@ -965,6 +1049,10 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 			m_flush_requests.post(false);
 			m_eng_interrupt_mask |= rsx::backend_interrupt;
 			has_queue_ref = true;
+			if (observe_exact_cohort)
+			{
+				result.exact_cohort_queue_posts = 1;
+			}
 		}
 		else
 		{
@@ -975,6 +1063,10 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 
 			// Flush primary cb queue to sync pending changes (e.g image transitions!)
 			flush_command_queue();
+			if (observe_exact_cohort)
+			{
+				result.exact_cohort_submission_ready_us = get_system_time();
+			}
 		}
 
 		if (has_queue_ref)
@@ -984,12 +1076,12 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 				rsx::coherence_stats::scoped_timer wait_timer(rsx::coherence_stats::g_ledger.vk_flush_wait, nullptr, rsx::coherence_stats::fault_timing::flush_wait);
 				m_flush_requests.producer_wait();
 			}
-
-			data_transfer_completed_callback = [&]()
+			if (observe_exact_cohort)
 			{
-				m_flush_requests.remove_one();
-				has_queue_ref = false;
-			};
+				result.exact_cohort_submission_ready_us = get_system_time();
+			}
+
+			data_transfer_completed_callback = release_queue_ref;
 		}
 
 		m_texture_cache.flush_all(*m_secondary_cb_list.next(), result, data_transfer_completed_callback);
@@ -997,26 +1089,18 @@ bool VKGSRender::on_access_violation(u32 address, bool is_writing)
 		if (has_queue_ref)
 		{
 			// Release RSX thread if it's still locked
-			m_flush_requests.remove_one();
+			release_queue_ref();
 		}
+
+		finalize_exact_cohort(rsx::cell_access::exact_cohort_terminal_kind::replan_mismatch);
 	}
 
 	return true;
 }
 
-rsx::cell_access::ready_get_result VKGSRender::try_read_ready_cell_backing(
-	u32 address, u32 size, void* dst, u64 epoch)
-{
-	return m_texture_cache.try_read_ready_cell_backing(address, size, dst, epoch);
-}
-
 void VKGSRender::on_invalidate_memory_range(const utils::address_range32 &range, rsx::invalidation_cause cause)
 {
 	std::lock_guard lock(m_secondary_cb_guard);
-	if (cause == rsx::invalidation_cause::unmap)
-	{
-		m_texture_cache.clear_cell_backing_receipts(range);
-	}
 
 	auto data = m_texture_cache.invalidate_range(*m_secondary_cb_list.next(), range, cause);
 	AUDIT(data.empty());
@@ -1292,15 +1376,10 @@ void VKGSRender::on_init_thread()
 			m_shaders_cache->load(&dlg);
 		}
 	}
-
-	rsx::cell_access::g_ownership_directory.publish_renderer_lifetime(this);
 }
 
 void VKGSRender::on_exit()
 {
-	// Stop new Cell tickets and wait for every active renderer/cache reader
-	// before any Vulkan backend teardown starts.
-	rsx::cell_access::g_ownership_directory.unpublish_renderer_lifetime(this);
 	GSRender::on_exit();
 	vk::destroy_pipe_compiler(); // Ensure no pending shaders being compiled
 	zcull_ctrl.release();
@@ -1776,7 +1855,11 @@ void VKGSRender::do_local_task(rsx::FIFO::state state)
 			flush_command_queue();
 
 			m_flush_requests.clear_pending_flag();
-			m_flush_requests.consumer_wait();
+			{
+				rsx::coherence_stats::scoped_timer consumer_wait_timer(
+					rsx::coherence_stats::g_ledger.vk_flush_consumer_wait);
+				m_flush_requests.consumer_wait();
+			}
 			m_flush_queue_mutex.unlock();
 		}
 	}

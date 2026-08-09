@@ -8,6 +8,7 @@
 #include "Emu/RSX/Common/cell_access_coherence.h"
 #include "Emu/RSX/Common/texture_cache_utils.h"
 #include "Emu/RSX/Host/MM.h"
+#include "Emu/RSX/RSXCoherenceStats.h"
 #include "Emu/Cell/SPUThread.h"
 
 namespace
@@ -377,117 +378,6 @@ TEST(RsxCellAccessDirectory, StableSessionPinsOwnershipAndEpoch)
 	EXPECT_TRUE(stable.probe(external.start, 1).maybe_nontexture);
 }
 
-TEST(RsxCellAccessDirectory, CellBackingReceiptRequiresCurrentGenerationAndCoversOnlyLogicalIntersection)
-{
-	cell_backing_receipt receipt;
-	const auto section = range(0x20000100, 0x180);
-	const auto request = range(0x20000080, 0x200);
-	const auto covered = request.get_intersect(section);
-	constexpr u64 epoch = 9;
-	constexpr u64 generation = 27;
-
-	receipt.publish(section, generation, epoch);
-	EXPECT_TRUE(receipt.matches(covered, epoch));
-	EXPECT_TRUE(receipt.matches_generation(generation));
-	EXPECT_FALSE(receipt.matches(request, epoch));
-	EXPECT_FALSE(receipt.matches(covered, epoch + 1));
-	EXPECT_FALSE(receipt.matches_generation(generation + 1));
-
-	receipt.clear();
-	EXPECT_FALSE(receipt.matches(covered, epoch));
-	EXPECT_FALSE(receipt.matches_generation(generation));
-}
-
-TEST(RsxCellAccessDirectory, ReadyGetRangeEligibilityRejectsUnpinnableGuestRanges)
-{
-	EXPECT_TRUE(spu_is_ready_cell_backing_range_eligible(0x10020, 0x200));
-	EXPECT_TRUE(spu_is_ready_cell_backing_range_eligible(0x1c000, 0x4000));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x1ff00, 0x200));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(rsx::constants::local_mem_base, 0x80));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(RAW_SPU_BASE_ADDR, 0x80));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0xfffffff0, 0x20));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x10000, 0));
-	EXPECT_FALSE(spu_is_ready_cell_backing_range_eligible(0x10000, 0x4001));
-}
-
-TEST(RsxCellAccessDirectory, RendererLifetimeSessionPinsPublishedBackendAgainstTeardown)
-{
-	auto directory = std::make_unique<ownership_directory>();
-	directory->begin_renderer_lifetime_quiescent();
-	auto* renderer = reinterpret_cast<rsx::thread*>(static_cast<uintptr_t>(1));
-	directory->publish_renderer_lifetime(renderer);
-
-	std::atomic<bool> started = false;
-	std::atomic<bool> completed = false;
-	std::thread teardown;
-	{
-		auto lifetime = directory->begin_renderer_lifetime_session();
-		EXPECT_EQ(lifetime.renderer(), renderer);
-		EXPECT_EQ(lifetime.epoch(), directory->lifetime_epoch());
-		teardown = std::thread([&]
-		{
-			started.store(true, std::memory_order_release);
-			directory->unpublish_renderer_lifetime(renderer);
-			completed.store(true, std::memory_order_release);
-		});
-
-		while (!started.load(std::memory_order_acquire))
-		{
-			std::this_thread::yield();
-		}
-		EXPECT_FALSE(completed.load(std::memory_order_acquire));
-	}
-
-	teardown.join();
-	EXPECT_TRUE(completed.load(std::memory_order_acquire));
-	auto lifetime = directory->begin_renderer_lifetime_session();
-	EXPECT_EQ(lifetime.renderer(), nullptr);
-}
-
-TEST(RsxCellAccessDirectory, IntrusiveReceiptPinBlocksRetirementUntilExplicitClear)
-{
-	class test_resource final : public rsx::ref_counted
-	{
-	};
-
-	test_resource resource;
-	resource.add_ref(); // Existing NO/locked section ref.
-	intrusive_lifetime_pin<test_resource> receipt_pin;
-	receipt_pin.reset(&resource);
-	resource.release(); // Simulate discard releasing the section ref.
-
-	std::atomic<u32> phase = 0;
-	bool retained_during_retirement = false;
-	bool reusable_after_clear = false;
-	std::thread retirement([&]
-	{
-		while (phase.load(std::memory_order_acquire) < 1)
-		{
-			std::this_thread::yield();
-		}
-		retained_during_retirement = resource.has_refs();
-		phase.store(2, std::memory_order_release);
-
-		while (phase.load(std::memory_order_acquire) < 3)
-		{
-			std::this_thread::yield();
-		}
-		reusable_after_clear = !resource.has_refs();
-	});
-
-	phase.store(1, std::memory_order_release);
-	while (phase.load(std::memory_order_acquire) < 2)
-	{
-		std::this_thread::yield();
-	}
-	receipt_pin.reset();
-	phase.store(3, std::memory_order_release);
-	retirement.join();
-
-	EXPECT_TRUE(retained_during_retirement);
-	EXPECT_TRUE(reusable_after_clear);
-}
-
 TEST(RsxCellAccessDirectory, BufferedSectionConfirmedRangeExpansionTracksRealLifecycle)
 {
 	constexpr u32 test_address = 0x60000000;
@@ -544,4 +434,613 @@ TEST(RsxCellAccessDirectory, BufferedSectionDiscardClearsOwnershipAfterPhysicalU
 	EXPECT_EQ(section.get_protection(), utils::protection::rw);
 	EXPECT_FALSE(section.is_locked());
 	expect_texture_owner_count(locked_range, 0);
+}
+
+namespace
+{
+	exact_cohort_plan cohort_plan(u32 fault_address = 0x20000000, u64 cache_revision = 11)
+	{
+		exact_cohort_plan plan{};
+		plan.renderer_epoch = 3;
+		plan.directory_sequence = 8;
+		plan.cache_revision = cache_revision;
+		plan.fault_range = range(fault_address, 0x4000);
+		plan.invalidate_range = range(0x20000000, 0x8000);
+		plan.section_count = 1;
+		auto& section = plan.sections[0];
+		section.section_identity = 0x100;
+		section.section_session_generation = 0x200;
+		section.producer_identity = 0x300;
+		section.content_generation = 0x400;
+		section.transfer_generation = 0x500;
+		section.write_generation = 0x600;
+		section.full_range = range(0x20000000, 0x8000);
+		section.confirmed_range = section.full_range;
+		section.locked_range = section.full_range;
+		section.rsx_pitch = 5120;
+		section.gcm_format = 0x85;
+		section.width = 1280;
+		section.height = 720;
+		section.depth = 1;
+		section.mipmaps = 1;
+		return plan;
+	}
+
+	exact_cohort_member_observation cohort_member(u64 frame, u64 semantic_ready_us,
+		u64 queue_release_us, u32 readback_count = 0)
+	{
+		exact_cohort_member_observation observation{};
+		observation.frame = frame;
+		observation.fault_start_ticks = frame * 100;
+		observation.fault_end_ticks = frame * 100 + 90;
+		observation.flush_wait_start_ticks = frame * 100 + 10;
+		observation.flush_wait_end_ticks = frame * 100 + 20;
+		observation.readback_wait_start_ticks = readback_count ? frame * 100 + 30 : 0;
+		observation.readback_wait_end_ticks = readback_count ? frame * 100 + 80 : 0;
+		observation.readback_bytes = readback_count ? 64 : 0;
+		observation.submission_ready_us = semantic_ready_us;
+		observation.queue_ref_removed_us = queue_release_us;
+		observation.data_ready_us = semantic_ready_us;
+		observation.unprotect_done_us = semantic_ready_us;
+		observation.semantic_ready_us = semantic_ready_us;
+		observation.first_staged_completion_generation = 0x400;
+		observation.fault_address = 0x20000040;
+		observation.origin = static_cast<u8>(rsx::coherence_stats::fault_origin::spu);
+		observation.mfc_spu_id = 0x1234;
+		observation.mfc_ea = 0x20000040;
+		observation.mfc_size = 64;
+		observation.mfc_source = static_cast<u8>(rsx::coherence_stats::mfc_context_source::list_fastpath);
+		observation.mfc_cmd = 0x40;
+		observation.mfc_tag = 7;
+		observation.mfc_flags = rsx::coherence_stats::mfc_context_get |
+			rsx::coherence_stats::mfc_context_list;
+		observation.mfc_valid = true;
+		observation.mfc_contains_fault = true;
+		observation.flush_wait_count = 1;
+		observation.readback_wait_count = readback_count;
+		observation.readback_count = readback_count;
+		observation.transfer_count = readback_count;
+		observation.copied_start = readback_count ? 0x20000000u : static_cast<u32>(umax);
+		observation.copied_end = readback_count ? 0x2000003f : 0;
+		observation.flush_sections = readback_count;
+		observation.queue_posts = 1;
+		observation.replan_empty = !readback_count;
+		observation.cache_unchanged = true;
+		observation.semantic_plan_verified = true;
+		observation.completion_verified = readback_count;
+		return observation;
+	}
+}
+
+TEST(RsxCellAccessExactCohort, JoinsAcrossScanRevisionAndKeepsLeaderAndMaterializerTimelines)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto leader = oracle->begin(cohort_plan(0x20000000, 11), cohort_member(10, 90, 0));
+	const auto materializer = oracle->begin(cohort_plan(0x20000000, 12), cohort_member(10, 100, 0));
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(materializer.valid());
+	EXPECT_TRUE(leader.is_proposed_leader());
+	EXPECT_EQ(materializer.member, 1u);
+	const auto follower = oracle->begin(cohort_plan(0x20000000, 13), cohort_member(10, 120, 0));
+	ASSERT_TRUE(follower.valid());
+	EXPECT_EQ(follower.member, 2u);
+
+	oracle->complete(materializer, cohort_member(10, 100, 1000, 1));
+	oracle->resolve_noop(leader, cohort_member(10, 110, 1100));
+	oracle->resolve_noop(follower, cohort_member(10, 120, 1500));
+
+	const auto totals = oracle->snapshot();
+	EXPECT_EQ(totals.leaders, 1u);
+	EXPECT_EQ(totals.same_plan_ranges_followers, 2u);
+	EXPECT_EQ(totals.cache_revision_splits, 2u);
+	EXPECT_EQ(totals.materializers_published, 1u);
+	EXPECT_EQ(totals.first_completion_with_readback, 1u);
+	EXPECT_EQ(totals.leader_completion_without_readback, 0u);
+	EXPECT_EQ(totals.resolved_noops, 2u);
+	EXPECT_EQ(totals.timing_complete, 1u);
+	EXPECT_EQ(totals.homogeneous_spu_get_cohorts, 1u);
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_TRUE(completion.complete);
+	EXPECT_EQ(completion.registrations, 3u);
+	EXPECT_EQ(completion.first_done_member, 1u);
+	EXPECT_EQ(completion.successful_members, 1u);
+	EXPECT_EQ(completion.resolved_noop_members, 2u);
+	EXPECT_TRUE(completion.any_readback);
+	EXPECT_FALSE(completion.proposed_leader_had_readback);
+	EXPECT_FALSE(completion.proposed_leader_valid);
+	EXPECT_EQ(completion.materializer_queue_release_us, 1000u);
+	EXPECT_EQ(completion.proposed_leader_queue_release_us, 1100u);
+	EXPECT_EQ(completion.last_queue_release_us, 1500u);
+	EXPECT_EQ(completion.queue_tail_us, 500u);
+	EXPECT_EQ(completion.proposed_leader_queue_tail_us, 0u);
+	EXPECT_EQ(completion.spu_get_members, 3u);
+	EXPECT_EQ(completion.follower_queue_posts, 2u);
+	EXPECT_FALSE(oracle->try_pop_completion(completion));
+
+	exact_cohort_member_completion member{};
+	u32 member_records = 0;
+	while (oracle->try_pop_member_completion(member))
+	{
+		member_records++;
+		EXPECT_EQ(member.serial, leader.serial);
+		EXPECT_TRUE(member.observation.mfc_valid);
+		if (member.terminal == exact_cohort_terminal_kind::resolved_noop)
+		{
+			EXPECT_TRUE(member.after_first_successful_completion);
+		}
+	}
+	EXPECT_EQ(member_records, 3u);
+}
+
+TEST(RsxCellAccessExactCohort, RejectsUnknownGenerationsAndOddDirectorySessions)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto odd = cohort_plan();
+	odd.directory_sequence = 9;
+	EXPECT_FALSE(oracle->begin(odd).valid());
+
+	auto unknown = cohort_plan();
+	unknown.sections[0].section_session_generation = 0;
+	EXPECT_FALSE(oracle->begin(unknown).valid());
+
+	auto synchronized_unknown = cohort_plan();
+	synchronized_unknown.sections[0].synchronized = 1;
+	EXPECT_FALSE(oracle->begin(synchronized_unknown).valid());
+
+	// Zero sync/staged generations are a known state while unsynchronized.
+	const auto valid_unsynchronized = oracle->begin(cohort_plan());
+	ASSERT_TRUE(valid_unsynchronized.valid());
+	oracle->abandon(valid_unsynchronized, exact_cohort_terminal_kind::other_abandon);
+
+	const auto totals = oracle->snapshot();
+	EXPECT_EQ(totals.invalid_directory_sequence, 1u);
+	EXPECT_EQ(totals.unknown_generation_rejections, 2u);
+}
+
+TEST(RsxCellAccessExactCohort, RejectsFaultRangeOutsideInvalidateRange)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto malformed = cohort_plan(0x20008000);
+	ASSERT_TRUE(malformed.fault_range.valid());
+	ASSERT_TRUE(malformed.invalidate_range.valid());
+	ASSERT_FALSE(malformed.fault_range.inside(malformed.invalidate_range));
+	EXPECT_FALSE(oracle->begin(malformed).valid());
+
+	const auto totals = oracle->snapshot();
+	EXPECT_EQ(totals.invalid_range_rejections, 1u);
+	EXPECT_EQ(totals.unknown_generation_rejections, 0u);
+}
+
+TEST(RsxCellAccessExactCohort, CoversOnlyZeroTransferReplansAfterWorkReady)
+{
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan(), cohort_member(15, 100, 0));
+		const auto follower = oracle->begin(cohort_plan(), cohort_member(15, 120, 0));
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->complete(leader, cohort_member(15, 100, 1000, 1));
+		oracle->resolve_noop(follower, cohort_member(15, 120, 1500));
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_TRUE(completion.complete);
+		EXPECT_TRUE(completion.proposed_leader_valid);
+		EXPECT_EQ(completion.resolved_noop_members, 1u);
+		EXPECT_EQ(completion.queue_tail_us, 500u);
+		EXPECT_EQ(completion.proposed_leader_queue_tail_us, 500u);
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan(), cohort_member(16, 100, 0));
+		const auto follower = oracle->begin(cohort_plan(), cohort_member(16, 120, 0));
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->complete(leader, cohort_member(16, 100, 1000, 1));
+		oracle->resolve_noop(follower, cohort_member(16, 120, 1500, 1));
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_FALSE(completion.complete);
+		EXPECT_EQ(completion.resolved_noop_members, 0u);
+		EXPECT_EQ(completion.queue_tail_us, 0u);
+		EXPECT_EQ(oracle->snapshot().resolved_noops, 0u);
+	}
+}
+
+TEST(RsxCellAccessExactCohort, FailedProposedLeaderClosesRegistrationAndCensorsProjection)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto leader = oracle->begin(cohort_plan(), cohort_member(20, 100, 0));
+	const auto follower = oracle->begin(cohort_plan(), cohort_member(20, 110, 0));
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(follower.valid());
+
+	oracle->abandon(leader, exact_cohort_terminal_kind::replan_mismatch,
+		cohort_member(20, 100, 1000));
+	const auto next_leader = oracle->begin(cohort_plan(), cohort_member(20, 120, 0));
+	ASSERT_TRUE(next_leader.valid());
+	EXPECT_TRUE(next_leader.is_proposed_leader());
+	EXPECT_NE(next_leader.serial, leader.serial);
+
+	oracle->complete(follower, cohort_member(20, 110, 1200, 1));
+	oracle->abandon(next_leader, exact_cohort_terminal_kind::other_abandon);
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_FALSE(completion.complete);
+	EXPECT_EQ(completion.projected_tail_us, 0u);
+	EXPECT_EQ(completion.queue_tail_us, 0u);
+}
+
+TEST(RsxCellAccessExactCohort, CensorsUnreadySuccessAndNoopBeforeMaterializer)
+{
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan());
+		const auto follower = oracle->begin(cohort_plan());
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->complete(leader); // Missing the under-lock semantic-ready milestone.
+		oracle->complete(follower, cohort_member(30, 100, 1000, 1));
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_FALSE(completion.complete);
+		EXPECT_EQ(completion.abandoned_members, 1u);
+		EXPECT_EQ(oracle->snapshot().replan_mismatches, 1u);
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan());
+		const auto follower = oracle->begin(cohort_plan());
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->resolve_noop(follower, cohort_member(31, 90, 900));
+		oracle->complete(leader, cohort_member(31, 100, 1000, 1));
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_FALSE(completion.complete);
+		EXPECT_EQ(completion.resolved_noop_members, 0u);
+		EXPECT_EQ(completion.abandoned_members, 1u);
+	}
+}
+
+TEST(RsxCellAccessExactCohort, CensorsMultipleMaterializers)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto leader = oracle->begin(cohort_plan());
+	const auto follower = oracle->begin(cohort_plan());
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(follower.valid());
+	oracle->complete(leader, cohort_member(32, 100, 1000, 1));
+	oracle->complete(follower, cohort_member(32, 110, 1200, 1));
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_FALSE(completion.complete);
+	EXPECT_EQ(completion.successful_members, 2u);
+	EXPECT_EQ(oracle->snapshot().multiple_materializers, 1u);
+}
+
+TEST(RsxCellAccessExactCohort, ResetPreservesSerialAgainstLateTicketAba)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto old_ticket = oracle->begin(cohort_plan());
+	ASSERT_TRUE(old_ticket.valid());
+	oracle->reset();
+	const auto new_ticket = oracle->begin(cohort_plan());
+	ASSERT_TRUE(new_ticket.valid());
+	EXPECT_NE(old_ticket.serial, new_ticket.serial);
+
+	oracle->complete(old_ticket);
+	EXPECT_EQ(oracle->snapshot().stale_completion, 1u);
+	oracle->abandon(new_ticket, exact_cohort_terminal_kind::other_abandon);
+}
+
+TEST(RsxCellAccessExactCohort, TimesCrossPageSemanticMembersWithDirectionalCoverage)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto first_plan = cohort_plan(0x20000000);
+	const auto second_plan = cohort_plan(0x20004000);
+	const auto first = oracle->begin(first_plan);
+	const auto second = oracle->begin(second_plan);
+	ASSERT_TRUE(first.valid());
+	ASSERT_TRUE(second.valid());
+	EXPECT_EQ(first.serial, second.serial);
+	EXPECT_EQ(second.member, 1u);
+	EXPECT_TRUE(oracle->matches_ticket_plan(first, first_plan));
+	EXPECT_TRUE(oracle->matches_ticket_plan(second, second_plan));
+	EXPECT_FALSE(oracle->matches_ticket_plan(second, first_plan));
+	EXPECT_EQ(oracle->snapshot().cross_page_same_plan_pairs, 1u);
+	EXPECT_EQ(oracle->snapshot().cross_page_followers_covered_by_leader, 1u);
+	EXPECT_EQ(oracle->snapshot().different_plan_ranges_followers, 1u);
+	oracle->complete(first, cohort_member(35, 100, 1000, 1));
+	oracle->resolve_noop(second, cohort_member(35, 120, 1500));
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_TRUE(completion.complete);
+	EXPECT_TRUE(completion.materializer_covers_all_faults);
+	EXPECT_TRUE(completion.proposed_leader_covers_all_faults);
+	EXPECT_EQ(completion.cross_page_members, 1u);
+	EXPECT_EQ(completion.materializer_fault_range, first_plan.fault_range);
+	EXPECT_EQ(completion.queue_tail_us, 500u);
+}
+
+TEST(RsxCellAccessExactCohort, CensorsCrossPageTailOutsideMaterializerInvalidateRange)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto outside = cohort_plan(0x20008000);
+	outside.invalidate_range = range(0x20008000, 0x4000);
+	const auto first = oracle->begin(cohort_plan(0x20000000));
+	const auto second = oracle->begin(outside);
+	ASSERT_TRUE(first.valid());
+	ASSERT_TRUE(second.valid());
+	EXPECT_EQ(first.serial, second.serial);
+	oracle->complete(first, cohort_member(36, 100, 1000, 1));
+	oracle->resolve_noop(second, cohort_member(36, 120, 1500));
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_FALSE(completion.complete);
+	EXPECT_FALSE(completion.materializer_covers_all_faults);
+	EXPECT_EQ(completion.queue_tail_us, 0u);
+}
+
+TEST(RsxCellAccessExactCohort, CountsEveryCrossPagePairAndOnlyDirectionalLeaderCoverage)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto first_a = oracle->begin(cohort_plan(0x20000000));
+	const auto b = oracle->begin(cohort_plan(0x20004000));
+	const auto second_a = oracle->begin(cohort_plan(0x20000000));
+	ASSERT_TRUE(first_a.valid());
+	ASSERT_TRUE(b.valid());
+	ASSERT_TRUE(second_a.valid());
+
+	const auto totals = oracle->snapshot();
+	EXPECT_EQ(totals.cross_page_same_plan_pairs, 2u);
+	EXPECT_EQ(totals.cross_page_followers_covered_by_leader, 1u);
+	EXPECT_EQ(totals.same_plan_ranges_followers, 1u);
+	EXPECT_EQ(totals.different_plan_ranges_followers, 1u);
+
+	oracle->abandon(first_a, exact_cohort_terminal_kind::other_abandon);
+	oracle->abandon(b, exact_cohort_terminal_kind::other_abandon);
+	oracle->abandon(second_a, exact_cohort_terminal_kind::other_abandon);
+}
+
+TEST(RsxCellAccessExactCohort, SameFaultWithDifferentInvalidateIsNotCrossPageCoverage)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto different_invalidate = cohort_plan(0x20000000);
+	different_invalidate.invalidate_range = range(0x20000000, 0x4000);
+	const auto leader = oracle->begin(cohort_plan(0x20000000));
+	const auto follower = oracle->begin(different_invalidate);
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(follower.valid());
+
+	const auto totals = oracle->snapshot();
+	EXPECT_EQ(totals.cross_page_same_plan_pairs, 0u);
+	EXPECT_EQ(totals.cross_page_followers_covered_by_leader, 0u);
+	EXPECT_EQ(totals.same_plan_ranges_followers, 0u);
+	EXPECT_EQ(totals.different_plan_ranges_followers, 1u);
+
+	oracle->abandon(leader, exact_cohort_terminal_kind::other_abandon);
+	oracle->abandon(follower, exact_cohort_terminal_kind::other_abandon);
+}
+
+TEST(RsxCellAccessExactCohort, SemanticResolutionClosesRegistrationBeforeRuntimeFinalization)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto leader_begin = cohort_member(40, 0, 0);
+	leader_begin.mfc_ea = 0x20000100;
+	leader_begin.mfc_size = 128;
+	const auto leader = oracle->begin(cohort_plan(), leader_begin);
+	const auto follower = oracle->begin(cohort_plan(), cohort_member(40, 0, 0));
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(follower.valid());
+
+	auto semantic = cohort_member(40, 100, 0, 1);
+	semantic.mfc_ea = 0xdead0000;
+	ASSERT_TRUE(oracle->resolve_semantic(leader, exact_cohort_terminal_kind::success, semantic));
+
+	// Publishing the materializer under the semantic lock closes registration,
+	// even though its queue/fault timing is not finalized yet.
+	const auto successor = oracle->begin(cohort_plan(), cohort_member(40, 130, 0));
+	ASSERT_TRUE(successor.valid());
+	EXPECT_TRUE(successor.is_proposed_leader());
+	EXPECT_NE(successor.serial, leader.serial);
+
+	ASSERT_TRUE(oracle->resolve_semantic(follower,
+		exact_cohort_terminal_kind::resolved_noop, cohort_member(40, 120, 0)));
+	exact_cohort_member_observation follower_final{};
+	follower_final.fault_end_ticks = 4090;
+	follower_final.queue_posts = 1;
+	follower_final.queue_ref_removed_us = 1500;
+	oracle->finalize_member(follower, follower_final);
+
+	exact_cohort_member_observation leader_final{};
+	leader_final.fault_end_ticks = 4080;
+	leader_final.queue_posts = 1;
+	leader_final.queue_ref_removed_us = 1000;
+	oracle->finalize_member(leader, leader_final);
+	oracle->abandon(successor, exact_cohort_terminal_kind::other_abandon);
+
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_TRUE(completion.complete);
+	EXPECT_EQ(completion.queue_tail_us, 500u);
+
+	exact_cohort_member_completion member{};
+	bool found_leader = false;
+	while (oracle->try_pop_member_completion(member))
+	{
+		if (member.serial != leader.serial || member.member != leader.member)
+		{
+			continue;
+		}
+		found_leader = true;
+		// Finalization merges only runtime fields; begin-time MFC identity and the
+		// under-lock semantic evidence survive unchanged.
+		EXPECT_EQ(member.observation.mfc_ea, 0x20000100u);
+		EXPECT_EQ(member.observation.mfc_size, 128u);
+		EXPECT_TRUE(member.observation.semantic_plan_verified);
+		EXPECT_TRUE(member.observation.completion_verified);
+		EXPECT_EQ(member.observation.semantic_ready_us, 100u);
+		EXPECT_EQ(member.observation.queue_ref_removed_us, 1000u);
+	}
+	EXPECT_TRUE(found_leader);
+}
+
+TEST(RsxCellAccessExactCohort, MissingOrSpuriousQueueReleaseCensorsOnlyQueueMetric)
+{
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan());
+		const auto follower = oracle->begin(cohort_plan());
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->complete(leader, cohort_member(41, 100, 1000, 1));
+		oracle->resolve_noop(follower, cohort_member(41, 120, 0));
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_TRUE(completion.complete);
+		EXPECT_EQ(completion.queue_tail_us, 0u);
+		EXPECT_EQ(oracle->snapshot().incomplete_queue_timing, 1u);
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		const auto leader = oracle->begin(cohort_plan());
+		const auto follower = oracle->begin(cohort_plan());
+		ASSERT_TRUE(leader.valid());
+		ASSERT_TRUE(follower.valid());
+		oracle->complete(leader, cohort_member(42, 100, 1000, 1));
+		auto spurious = cohort_member(42, 120, 1500);
+		spurious.queue_posts = 0;
+		oracle->resolve_noop(follower, spurious);
+
+		exact_cohort_completion completion{};
+		ASSERT_TRUE(oracle->try_pop_completion(completion));
+		EXPECT_TRUE(completion.complete);
+		EXPECT_EQ(completion.last_queue_release_us, 1000u);
+		EXPECT_EQ(completion.queue_tail_us, 0u);
+		EXPECT_EQ(oracle->snapshot().queue_timestamp_without_post, 1u);
+	}
+}
+
+TEST(RsxCellAccessExactCohort, NonLeaderMismatchClosesRegistrationImmediately)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto leader = oracle->begin(cohort_plan());
+	const auto follower = oracle->begin(cohort_plan());
+	ASSERT_TRUE(leader.valid());
+	ASSERT_TRUE(follower.valid());
+	ASSERT_TRUE(oracle->resolve_semantic(follower,
+		exact_cohort_terminal_kind::replan_mismatch));
+
+	const auto successor = oracle->begin(cohort_plan());
+	ASSERT_TRUE(successor.valid());
+	EXPECT_TRUE(successor.is_proposed_leader());
+	EXPECT_NE(successor.serial, leader.serial);
+
+	oracle->finalize_member(follower);
+	oracle->complete(leader, cohort_member(43, 100, 1000, 1));
+	oracle->abandon(successor, exact_cohort_terminal_kind::other_abandon);
+	exact_cohort_completion completion{};
+	ASSERT_TRUE(oracle->try_pop_completion(completion));
+	EXPECT_FALSE(completion.complete);
+}
+
+TEST(RsxCellAccessExactCohort, RejectsFlushExclusions)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	auto plan = cohort_plan();
+	plan.sections[0].has_flush_exclusions = true;
+	EXPECT_FALSE(oracle->begin(plan).valid());
+	EXPECT_EQ(oracle->snapshot().flush_exclusion_rejections, 1u);
+}
+
+TEST(RsxCellAccessExactCohort, CountsDuplicateSemanticAndRuntimeTerminals)
+{
+	auto oracle = std::make_unique<exact_cohort_oracle>();
+	const auto ticket = oracle->begin(cohort_plan());
+	ASSERT_TRUE(ticket.valid());
+	const auto observation = cohort_member(44, 100, 1000, 1);
+	EXPECT_TRUE(oracle->resolve_semantic(ticket,
+		exact_cohort_terminal_kind::success, observation));
+	EXPECT_FALSE(oracle->resolve_semantic(ticket,
+		exact_cohort_terminal_kind::success, observation));
+	oracle->finalize_member(ticket, observation);
+	oracle->finalize_member(ticket, observation);
+	EXPECT_EQ(oracle->snapshot().stale_completion, 2u);
+}
+
+TEST(RsxCellAccessExactCohort, ReportsBoundedSlotMemberAndRecordExhaustion)
+{
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		std::array<exact_cohort_ticket, exact_cohort_slot_capacity> tickets{};
+		for (u32 index = 0; index < tickets.size(); index++)
+		{
+			auto plan = cohort_plan(0x20000000 + index * 0x4000);
+			plan.invalidate_range = plan.fault_range;
+			plan.sections[0].section_identity += index;
+			tickets[index] = oracle->begin(plan);
+			ASSERT_TRUE(tickets[index].valid());
+		}
+		auto overflow = cohort_plan(0x21000000);
+		overflow.invalidate_range = overflow.fault_range;
+		overflow.sections[0].section_identity += tickets.size();
+		EXPECT_FALSE(oracle->begin(overflow).valid());
+		EXPECT_EQ(oracle->snapshot().slot_exhaustion, 1u);
+		for (const auto ticket : tickets)
+		{
+			oracle->abandon(ticket, exact_cohort_terminal_kind::other_abandon);
+		}
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		std::array<exact_cohort_ticket, exact_cohort_member_capacity> tickets{};
+		for (auto& ticket : tickets)
+		{
+			ticket = oracle->begin(cohort_plan());
+			ASSERT_TRUE(ticket.valid());
+		}
+		EXPECT_FALSE(oracle->begin(cohort_plan()).valid());
+		EXPECT_EQ(oracle->snapshot().member_exhaustion, 1u);
+		for (const auto ticket : tickets)
+		{
+			oracle->abandon(ticket, exact_cohort_terminal_kind::other_abandon);
+		}
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		for (u32 index = 0; index < exact_cohort_completion_capacity + 1; index++)
+		{
+			const auto ticket = oracle->begin(cohort_plan());
+			ASSERT_TRUE(ticket.valid());
+			oracle->complete(ticket, cohort_member(50 + index, 100, 1000, 1));
+		}
+		EXPECT_EQ(oracle->snapshot().completion_record_drops, 1u);
+	}
+
+	{
+		auto oracle = std::make_unique<exact_cohort_oracle>();
+		for (u32 index = 0; index < exact_cohort_member_completion_capacity + 1; index++)
+		{
+			const auto ticket = oracle->begin(cohort_plan());
+			ASSERT_TRUE(ticket.valid());
+			oracle->abandon(ticket, exact_cohort_terminal_kind::other_abandon);
+		}
+		EXPECT_EQ(oracle->snapshot().member_record_drops, 1u);
+	}
 }

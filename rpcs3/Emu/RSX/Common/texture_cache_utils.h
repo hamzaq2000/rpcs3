@@ -1789,6 +1789,11 @@ namespace rsx
 			return swizzled;
 		}
 
+		bool has_flush_exclusions() const
+		{
+			return !flush_exclusions.empty();
+		}
+
 		memory_read_flags get_memory_read_flags() const
 		{
 			return readback_behaviour;

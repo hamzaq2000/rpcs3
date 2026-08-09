@@ -69,6 +69,12 @@ namespace rsx
 			u32 num_excluded = 0;  // Sections-to-exclude + sections that would have been excluded but are false positives
 			u32 num_discarded = 0;
 			u64 cache_tag = 0;
+			cell_access::exact_cohort_ticket exact_cohort_ticket{};
+			bool exact_cohort_plan_current = false;
+			bool exact_cohort_semantic_resolved = false;
+			u8 exact_cohort_queue_posts = 0;
+			u64 exact_cohort_submission_ready_us = 0;
+			u64 exact_cohort_queue_ref_removed_us = 0;
 
 			address_range32 fault_range;
 			address_range32 invalidate_range;
@@ -1165,6 +1171,25 @@ namespace rsx
 		 * Section invalidation
 		 */
 	private:
+		struct exact_cohort_execution_observer
+		{
+			cell_access::exact_cohort_ticket ticket{};
+			cell_access::exact_cohort_plan plan{};
+			u64 data_ready_us = 0;
+			u64 unprotect_done_us = 0;
+			u64 first_staged_completion_generation = 0;
+			u16 flush_sections = 0;
+			u16 unprotect_sections = 0;
+			u16 discarded_sections = 0;
+			bool plan_captured = false;
+			bool semantic_plan_verified = false;
+			bool completion_verified = false;
+		};
+
+		// Non-null only while flush_all holds m_cache_mutex and asks the existing
+		// undeferred replan path to expose its actual execution plan/milestones.
+		exact_cohort_execution_observer* m_exact_cohort_execution_observer = nullptr;
+
 		template <typename ...Args>
 		void flush_set(commandbuffer_type& cmd, thrashed_set& data, std::function<void()> on_data_transfer_completed, Args&&... extras)
 		{
@@ -1197,6 +1222,7 @@ namespace rsx
 
 			if (!sections_to_transfer.empty())
 			{
+				coherence_stats::record_transfer_sections(static_cast<u32>(sections_to_transfer.size()));
 				// Batch all hard faults together
 				prepare_for_dma_transfers(cmd);
 
@@ -1502,6 +1528,259 @@ namespace rsx
 			return result;
 		}
 
+		cell_access::exact_cohort_section_token make_exact_cohort_token(
+			const section_storage_type& section,
+			cell_access::exact_cohort_section_role role,
+			u8 raw_rank,
+			u8 execution_rank) const noexcept
+		{
+			cell_access::exact_cohort_section_token result{};
+			result.section_identity = reinterpret_cast<uptr>(&section);
+			result.synchronization_generation = section.get_sync_timestamp();
+			result.write_generation = section.last_write_tag;
+			result.full_range = section.get_section_range();
+			result.confirmed_range = section.get_confirmed_range();
+			result.locked_range = section.get_locked_range();
+			result.context = static_cast<u32>(section.get_context());
+			result.protection = static_cast<u8>(section.get_protection());
+			result.read_flags = static_cast<u8>(section.get_memory_read_flags());
+			result.synchronized = section.is_synchronized();
+			result.raw_rank = raw_rank;
+			result.rsx_pitch = section.get_rsx_pitch();
+			result.gcm_format = section.get_gcm_format();
+			result.width = section.get_width();
+			result.height = section.get_height();
+			result.depth = section.get_depth();
+			result.mipmaps = section.get_mipmaps();
+			result.swizzled = section.is_swizzled();
+			result.has_flush_exclusions = section.has_flush_exclusions();
+			result.role = role;
+			result.execution_rank = execution_rank;
+
+			if constexpr (requires { section.get_cell_access_producer_identity(); })
+			{
+				result.producer_identity = section.get_cell_access_producer_identity();
+			}
+			if constexpr (requires { section.get_cell_access_session_generation(); })
+			{
+				result.section_session_generation = section.get_cell_access_session_generation();
+			}
+			if constexpr (requires { section.get_cell_access_content_generation(); })
+			{
+				result.content_generation = section.get_cell_access_content_generation();
+			}
+			if constexpr (requires { section.get_cell_access_staged_generation(); })
+			{
+				result.staged_generation = section.get_cell_access_staged_generation();
+			}
+			if constexpr (requires { section.get_cell_access_transfer_generation(); })
+			{
+				result.transfer_generation = section.get_cell_access_transfer_generation();
+			}
+
+			return result;
+		}
+
+		bool capture_exact_cohort_plan(const thrashed_set& result,
+			u64 cache_revision, cell_access::exact_cohort_plan& plan,
+			bool record_overflow) const noexcept
+		{
+			const usz section_count = result.sections_to_flush.size() +
+				result.sections_to_unprotect.size() + result.sections_to_exclude.size();
+			if (!section_count || section_count > cell_access::exact_cohort_plan_capacity)
+			{
+				if (record_overflow)
+				{
+					cell_access::g_exact_cohort_oracle.record_plan_overflow();
+				}
+				return false;
+			}
+
+			plan = {};
+			plan.cache_revision = cache_revision;
+			plan.fault_range = result.fault_range;
+			plan.invalidate_range = result.invalidate_range;
+			{
+				// Global order is cache, then the directory session innermost.
+				auto stable = cell_access::g_ownership_directory.begin_stable_session();
+				const auto ownership = stable.probe(result.fault_range.start, 1);
+				plan.renderer_epoch = ownership.lifetime_epoch;
+				plan.directory_sequence = stable.sequence();
+			}
+
+			u8 execution_rank = 0;
+			auto append = [&](const auto& sections, cell_access::exact_cohort_section_role role)
+			{
+				u8 raw_rank = 0;
+				for (const auto* section : sections)
+				{
+					plan.sections[plan.section_count++] =
+						make_exact_cohort_token(*section, role, raw_rank++, execution_rank++);
+				}
+			};
+
+			// flush_set sorts its input immediately before material execution. Mirror
+			// that comparator on a fixed local copy so this observer does not mutate a
+			// deferred plan or add work when the overlay is disabled.
+			struct ranked_section
+			{
+				section_storage_type* section = nullptr;
+				u8 raw_rank = 0;
+			};
+			std::array<ranked_section, cell_access::exact_cohort_plan_capacity> ordered_flush{};
+			for (u8 index = 0; index < result.sections_to_flush.size(); index++)
+			{
+				ordered_flush[index] = {result.sections_to_flush[index], index};
+			}
+			const auto ordered_flush_end = ordered_flush.begin() + result.sections_to_flush.size();
+			if (result.sections_to_flush.size() > 1)
+			{
+				std::sort(ordered_flush.begin(), ordered_flush_end,
+					FN(x.section->last_write_tag < y.section->last_write_tag));
+			}
+			for (auto it = ordered_flush.begin(); it != ordered_flush_end; ++it)
+			{
+				plan.sections[plan.section_count++] = make_exact_cohort_token(
+					*it->section, cell_access::exact_cohort_section_role::flush,
+					it->raw_rank, execution_rank++);
+			}
+
+			// Unprotect/exclude vectors execute in their existing order. Do not
+			// canonicalize by identity: order is part of the exact plan.
+			append(result.sections_to_unprotect, cell_access::exact_cohort_section_role::unprotect);
+			append(result.sections_to_exclude, cell_access::exact_cohort_section_role::exclude);
+			return true;
+		}
+
+		void capture_exact_cohort_execution(exact_cohort_execution_observer& observer,
+			const thrashed_set& result) const noexcept
+		{
+			observer.flush_sections = static_cast<u16>(result.sections_to_flush.size());
+			observer.unprotect_sections = static_cast<u16>(result.sections_to_unprotect.size());
+			observer.discarded_sections = static_cast<u16>(result.num_discarded);
+			if (result.num_discarded || !capture_exact_cohort_plan(
+				result, m_cache_update_tag.load(), observer.plan, false))
+			{
+				return;
+			}
+
+			observer.plan_captured = true;
+			observer.semantic_plan_verified =
+				cell_access::g_exact_cohort_oracle.matches_ticket_plan(observer.ticket, observer.plan);
+		}
+
+		void verify_exact_cohort_completion(exact_cohort_execution_observer& observer,
+			const thrashed_set& result) const noexcept
+		{
+			if constexpr (!requires(const section_storage_type& section)
+			{
+				section.get_cell_access_producer_identity();
+				section.get_cell_access_session_generation();
+				section.get_cell_access_staged_generation();
+			})
+			{
+				return;
+			}
+			else
+			{
+				if (!observer.semantic_plan_verified || !observer.flush_sections ||
+					static_cast<usz>(observer.flush_sections) != result.sections_to_flush.size())
+				{
+					return;
+				}
+
+				for (usz index = 0; index < result.sections_to_flush.size(); index++)
+				{
+					const auto& token = observer.plan.sections[index];
+					const auto& section = *result.sections_to_flush[index];
+					const u64 staged_generation = section.get_cell_access_staged_generation();
+					if (token.role != cell_access::exact_cohort_section_role::flush ||
+						token.execution_rank != static_cast<u8>(index) ||
+						token.section_identity != reinterpret_cast<uptr>(&section) ||
+						token.section_session_generation != section.get_cell_access_session_generation() ||
+						token.producer_identity != section.get_cell_access_producer_identity() ||
+						token.content_generation != token.transfer_generation ||
+						!staged_generation || staged_generation != token.transfer_generation ||
+						!section.is_flushed() || section.get_rsx_pitch() != token.rsx_pitch ||
+						section.get_gcm_format() != token.gcm_format ||
+						section.get_width() != token.width || section.get_height() != token.height ||
+						section.get_depth() != token.depth || section.get_mipmaps() != token.mipmaps ||
+						section.is_swizzled() != token.swizzled)
+					{
+						return;
+					}
+
+					if (!index)
+					{
+						observer.first_staged_completion_generation = staged_generation;
+					}
+				}
+
+				observer.completion_verified = true;
+			}
+		}
+
+		void begin_exact_cohort_observation(thrashed_set& result) noexcept
+		{
+			if (!coherence_stats::is_enabled() || !result.violation_handled ||
+				!result.cause.is_read() || !result.cause.deferred_flush() ||
+				!result.num_flushable)
+			{
+				return;
+			}
+			if (result.num_discarded)
+			{
+				// The initial scan already changed cache/section state, so its returned
+				// vectors are not a complete counterfactual plan.
+				cell_access::g_exact_cohort_oracle.record_preplan_mutation();
+				return;
+			}
+			if constexpr (!requires(const section_storage_type& section)
+			{
+				section.get_cell_access_producer_identity();
+				section.get_cell_access_session_generation();
+				section.get_cell_access_content_generation();
+				section.get_cell_access_staged_generation();
+				section.get_cell_access_transfer_generation();
+			})
+			{
+				cell_access::g_exact_cohort_oracle.record_unsupported_backend();
+				return;
+			}
+
+			cell_access::exact_cohort_plan plan{};
+			if (!capture_exact_cohort_plan(result, result.cache_tag, plan, true))
+			{
+				return;
+			}
+
+			cell_access::exact_cohort_member_observation observation{};
+			if (const auto* event = coherence_stats::g_active_fault_event)
+			{
+				observation.frame = event->frame;
+				observation.fault_start_ticks = event->timestamp_ticks;
+				observation.fault_address = event->fault_address;
+				observation.origin_id = event->origin_id;
+				observation.origin_guest_pc = event->origin_guest_pc;
+				observation.origin = static_cast<u8>(event->origin);
+				observation.mfc_spu_id = event->mfc.spu_id;
+				observation.mfc_ea = event->mfc.ea;
+				observation.mfc_size = event->mfc.size;
+				observation.mfc_source = static_cast<u8>(event->mfc.source);
+				observation.mfc_cmd = event->mfc.cmd;
+				observation.mfc_tag = event->mfc.tag;
+				observation.mfc_flags = event->mfc.flags;
+				observation.mfc_valid = event->mfc.valid;
+				observation.mfc_contains_fault = event->mfc_contains_fault;
+			}
+			result.exact_cohort_ticket = cell_access::g_exact_cohort_oracle.begin(plan, observation);
+			if (result.exact_cohort_ticket.valid() && observation.is_spu_get())
+			{
+				coherence_stats::note_mfc_slack_candidate(result.exact_cohort_ticket.serial,
+					result.exact_cohort_ticket.member);
+			}
+		}
+
 
 		//Invalidate range base implementation
 		template <typename ...Args>
@@ -1700,6 +1979,10 @@ namespace rsx
 
 			const bool has_flushables = !result.sections_to_flush.empty();
 			const bool has_unprotectables = !result.sections_to_unprotect.empty();
+			if (m_exact_cohort_execution_observer)
+			{
+				capture_exact_cohort_execution(*m_exact_cohort_execution_observer, result);
+			}
 
 			if (cause.deferred_flush() && has_flushables)
 			{
@@ -1717,9 +2000,18 @@ namespace rsx
 				if (has_flushables && !cause.skip_flush())
 				{
 					flush_set(cmd, result, on_data_transfer_completed, std::forward<Args>(extras)...);
+					if (m_exact_cohort_execution_observer)
+					{
+						m_exact_cohort_execution_observer->data_ready_us = get_system_time();
+						verify_exact_cohort_completion(*m_exact_cohort_execution_observer, result);
+					}
 				}
 
 				unprotect_set(result);
+				if (m_exact_cohort_execution_observer)
+				{
+					m_exact_cohort_execution_observer->unprotect_done_us = get_system_time();
+				}
 
 				// Everything has been handled
 				result.clear_sections();
@@ -2134,7 +2426,6 @@ namespace rsx
 		{
 			if (g_cfg.video.write_color_buffers || g_cfg.video.write_depth_buffer)
 			{
-				std::lock_guard lock(m_cache_mutex);
 				auto* region_ptr = find_cached_texture(rsx_range, { .gcm_format = RSX_GCM_FORMAT_IGNORED }, false, false, false);
 				if (region_ptr && region_ptr->is_locked() && region_ptr->get_context() == texture_upload_context::framebuffer_storage)
 				{
@@ -2233,6 +2524,7 @@ namespace rsx
 				? cell_access::g_ownership_directory.probe(address, 1)
 				: cell_access::page_probe_result::invalid;
 			auto result = invalidate_range_impl_base(cmd, range, cause, on_data_transfer_completed, std::forward<Args>(extras)...);
+			begin_exact_cohort_observation(result);
 
 			if (validate_read_fault)
 			{
@@ -2266,23 +2558,124 @@ namespace rsx
 		template <typename ...Args>
 		bool flush_all(commandbuffer_type& cmd, thrashed_set& data, std::function<void()> on_data_transfer_completed = {}, Args&&... extras)
 		{
-			std::lock_guard lock(m_cache_mutex);
-
-			AUDIT(data.cause.deferred_flush());
-			AUDIT(!data.flushed);
-
-			if (m_cache_update_tag.load() == data.cache_tag)
 			{
-				//1. Write memory to cpu side
-				flush_set(cmd, data, on_data_transfer_completed, std::forward<Args>(extras)...);
+				std::lock_guard lock(m_cache_mutex);
 
-				//2. Release all obsolete sections
-				unprotect_set(data);
-			}
-			else
-			{
-				// The cache contents have changed between the two readings. This means the data held is useless
-				invalidate_range_impl_base(cmd, data.fault_range, data.cause.undefer(), on_data_transfer_completed, std::forward<Args>(extras)...);
+				AUDIT(data.cause.deferred_flush());
+				AUDIT(!data.flushed);
+
+				const bool observe_exact_cohort = data.exact_cohort_ticket.valid();
+				const auto* fault_event = observe_exact_cohort
+					? coherence_stats::g_active_fault_event : nullptr;
+				const u32 readback_count_before = fault_event ? fault_event->readback_count : 0;
+				const u32 readback_wait_count_before = fault_event ? fault_event->readback_wait_count : 0;
+				const u32 transfer_count_before = fault_event ? fault_event->transfer_count : 0;
+				const u64 readback_bytes_before = fault_event ? fault_event->readback_bytes : 0;
+				std::optional<exact_cohort_execution_observer> execution;
+				if (observe_exact_cohort)
+				{
+					execution.emplace();
+					execution->ticket = data.exact_cohort_ticket;
+				}
+				bool replan_empty = false;
+				bool cache_unchanged = false;
+
+				const bool plan_current = m_cache_update_tag.load() == data.cache_tag;
+				if (observe_exact_cohort)
+				{
+					data.exact_cohort_plan_current = plan_current;
+				}
+				if (plan_current)
+				{
+					if (observe_exact_cohort)
+					{
+						capture_exact_cohort_execution(*execution, data);
+					}
+
+					//1. Write memory to cpu side
+					flush_set(cmd, data, on_data_transfer_completed, std::forward<Args>(extras)...);
+					if (observe_exact_cohort)
+					{
+						execution->data_ready_us = get_system_time();
+						verify_exact_cohort_completion(*execution, data);
+					}
+
+					//2. Release all obsolete sections
+					unprotect_set(data);
+					if (observe_exact_cohort)
+					{
+						execution->unprotect_done_us = get_system_time();
+						cache_unchanged = true;
+					}
+				}
+				else
+				{
+					// The cache contents have changed between the two readings. This means the data held is useless
+					const u64 cache_tag_before_replan = observe_exact_cohort
+						? m_cache_update_tag.load() : 0;
+					if (observe_exact_cohort)
+					{
+						ensure(!m_exact_cohort_execution_observer);
+						m_exact_cohort_execution_observer = &*execution;
+					}
+					const auto replan = invalidate_range_impl_base(cmd, data.fault_range,
+						data.cause.undefer(), on_data_transfer_completed, std::forward<Args>(extras)...);
+					if (observe_exact_cohort)
+					{
+						m_exact_cohort_execution_observer = nullptr;
+						cache_unchanged = cache_tag_before_replan == m_cache_update_tag.load();
+						replan_empty = !replan.violation_handled && replan.empty() &&
+							!execution->flush_sections && !execution->unprotect_sections &&
+							!execution->discarded_sections && cache_unchanged;
+					}
+				}
+
+				if (observe_exact_cohort)
+				{
+					const u64 semantic_ready_us = get_system_time();
+					cell_access::exact_cohort_member_observation observation{};
+					observation.submission_ready_us = data.exact_cohort_submission_ready_us;
+					observation.queue_ref_removed_us = data.exact_cohort_queue_ref_removed_us;
+					observation.data_ready_us = execution->data_ready_us;
+					observation.unprotect_done_us = execution->unprotect_done_us;
+					observation.semantic_ready_us = semantic_ready_us;
+					observation.first_staged_completion_generation =
+						execution->first_staged_completion_generation;
+					observation.flush_sections = execution->flush_sections;
+					observation.unprotect_sections = execution->unprotect_sections;
+					observation.discarded_sections = execution->discarded_sections;
+					observation.queue_posts = data.exact_cohort_queue_posts;
+					observation.replan_empty = replan_empty;
+					observation.cache_unchanged = cache_unchanged;
+					observation.semantic_plan_verified = execution->semantic_plan_verified || replan_empty;
+					observation.completion_verified = execution->completion_verified;
+
+					if (fault_event)
+					{
+						observation.frame = fault_event->frame;
+						observation.fault_start_ticks = fault_event->timestamp_ticks;
+						observation.readback_wait_start_ticks = fault_event->readback_wait_start;
+						observation.readback_wait_end_ticks = fault_event->readback_wait_end;
+						observation.readback_wait_count = fault_event->readback_wait_count - readback_wait_count_before;
+						observation.readback_count = fault_event->readback_count - readback_count_before;
+						observation.transfer_count = fault_event->transfer_count - transfer_count_before;
+						observation.readback_bytes = fault_event->readback_bytes - readback_bytes_before;
+						if (observation.readback_count && !readback_count_before)
+						{
+							observation.copied_start = fault_event->readback_start;
+							observation.copied_end = fault_event->readback_end;
+						}
+					}
+
+					const auto terminal = execution->semantic_plan_verified
+						? cell_access::exact_cohort_terminal_kind::success
+						: replan_empty
+							? cell_access::exact_cohort_terminal_kind::resolved_noop
+							: cell_access::exact_cohort_terminal_kind::replan_mismatch;
+					data.exact_cohort_semantic_resolved =
+						cell_access::g_exact_cohort_oracle.resolve_semantic(
+							data.exact_cohort_ticket, terminal, observation);
+				}
 			}
 
 			return true;
@@ -2338,7 +2731,7 @@ namespace rsx
 			m_storage.purge_unreleased_sections();
 		}
 
-		bool handle_memory_pressure_locked(problem_severity severity)
+		virtual bool handle_memory_pressure(problem_severity severity)
 		{
 			if (m_storage.m_unreleased_texture_objects)
 			{
@@ -2353,19 +2746,6 @@ namespace rsx
 			}
 
 			return false;
-		}
-
-		virtual bool handle_memory_pressure(problem_severity severity)
-		{
-			std::unique_lock lock(m_cache_mutex, std::defer_lock);
-			if (!lock.try_lock())
-			{
-				// OOM callbacks may re-enter while this thread already owns the
-				// cache. Skipping collection is safer than self-deadlocking.
-				return false;
-			}
-
-			return handle_memory_pressure_locked(severity);
 		}
 
 		void trim_sections()

@@ -197,6 +197,7 @@ if(BUILD_RPCS3_TESTS)
             tests/test_dmux_pamf.cpp
             tests/test_spu_analyser.cpp
             tests/test_spu_llvm_compile_claim.cpp
+            tests/test_spu_mfc_slack_oracle.cpp
             tests/test_types_util.cpp
             tests/test_vm_native.cpp
     )

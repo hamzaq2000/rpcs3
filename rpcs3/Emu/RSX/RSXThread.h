@@ -39,10 +39,6 @@ extern rsx::frame_capture_data frame_capture;
 namespace rsx
 {
 	class RSXDMAWriter;
-	namespace cell_access
-	{
-		enum class ready_get_result : u8;
-	}
 
 	struct context;
 
@@ -377,7 +373,6 @@ namespace rsx
 		virtual void flip(const display_flip_info_t& info) = 0;
 		virtual u64 timestamp();
 		virtual bool on_access_violation(u32 /*address*/, bool /*is_writing*/) { return false; }
-		virtual cell_access::ready_get_result try_read_ready_cell_backing(u32 address, u32 size, void* dst, u64 epoch);
 		virtual void on_invalidate_memory_range(const address_range32 & /*range*/, rsx::invalidation_cause) {}
 		virtual void notify_tile_unbound(u32 /*tile*/) {}
 

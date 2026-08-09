@@ -42,27 +42,25 @@ namespace vk
 		std::unique_ptr<vk::event> dma_fence;
 		vk::render_device* m_device = nullptr;
 		vk::viewable_image* vram_texture = nullptr;
-		rsx::cell_access::cell_backing_receipt m_cell_backing_receipt{};
-		rsx::cell_access::intrusive_lifetime_pin<vk::render_target> m_cell_backing_receipt_target;
-		utils::address_range32 m_pending_cell_backing_range{};
 		u64 m_synchronized_content_generation = 0;
+		u64 m_cell_access_session_generation = 0;
 
 	public:
 		using baseclass::cached_texture_section;
 
 		void reset(const utils::address_range32& memory_range)
 		{
-			clear_cell_backing_receipt();
 			m_synchronized_content_generation = 0;
 			baseclass::reset(memory_range);
+			m_cell_access_session_generation = rsx::coherence_stats::is_enabled()
+				? rsx::cell_access::allocate_exact_cohort_session_generation() : 0;
 		}
 
 		void create(u16 w, u16 h, u16 depth, u16 mipmaps, vk::image* image, u32 rsx_pitch, bool managed, u32 gcm_format, bool pack_swap_bytes = false)
 		{
-			// A new image binding is a new producer session. A receipt from an
-			// earlier flush may remain useful across discard, but never rebind.
-			clear_cell_backing_receipt();
 			m_synchronized_content_generation = 0;
+			m_cell_access_session_generation = rsx::coherence_stats::is_enabled()
+				? rsx::cell_access::allocate_exact_cohort_session_generation() : 0;
 			auto new_texture = static_cast<vk::viewable_image*>(image);
 			ensure(!exists() || !is_managed() || vram_texture == new_texture);
 
@@ -136,7 +134,6 @@ namespace vk
 
 		void destroy()
 		{
-			clear_cell_backing_receipt();
 			m_synchronized_content_generation = 0;
 			if (!exists() && context != rsx::texture_upload_context::dma)
 				return;
@@ -185,6 +182,45 @@ namespace vk
 		vk::render_target* get_render_target() const
 		{
 			return vk::as_rtt(vram_texture);
+		}
+
+		u64 get_cell_access_producer_identity() const noexcept
+		{
+			return reinterpret_cast<uptr>(vram_texture);
+		}
+
+		u64 get_cell_access_session_generation() const noexcept
+		{
+			return m_cell_access_session_generation;
+		}
+
+		u64 get_cell_access_content_generation() const noexcept
+		{
+			// The bounded oracle currently proves framebuffer producer/content
+			// generations. DMA/shader-read payloads need a dedicated transfer-session
+			// generation before they can be grouped safely.
+			return context == rsx::texture_upload_context::framebuffer_storage && exists()
+				? get_render_target()->get_content_generation() : 0;
+		}
+
+		u64 get_cell_access_staged_generation() const noexcept
+		{
+			if (!synchronized)
+			{
+				return 0;
+			}
+			if (context == rsx::texture_upload_context::framebuffer_storage)
+			{
+				return m_synchronized_content_generation;
+			}
+
+			return sync_timestamp;
+		}
+
+		u64 get_cell_access_transfer_generation() const noexcept
+		{
+			return context == rsx::texture_upload_context::framebuffer_storage
+				? get_cell_access_content_generation() : 0;
 		}
 
 		VkFormat get_format() const
@@ -300,7 +336,6 @@ namespace vk
 		void imp_flush() override
 		{
 			AUDIT(synchronized);
-			m_pending_cell_backing_range.invalidate();
 
 			// Synchronize, reset dma_fence after waiting
 			{
@@ -379,14 +414,6 @@ namespace vk
 					rsx_log.error("Unexpected swizzled texture format 0x%x", gcm_format);
 				}
 			}
-
-			if (!is_swizzled() && flush_exclusions.empty() &&
-				context == rsx::texture_upload_context::framebuffer_storage &&
-				m_synchronized_content_generation &&
-				get_render_target()->get_content_generation() == m_synchronized_content_generation)
-			{
-				m_pending_cell_backing_range = utils::address_range32::start_length(range.start, flush_length);
-			}
 		}
 
 		void* map_synchronized(u32, u32)
@@ -395,39 +422,7 @@ namespace vk
 		}
 
 		void finish_flush()
-		{
-			if (m_pending_cell_backing_range.valid())
-			{
-				// The section is still NO/locked here, so its surface-cache ref
-				// guarantees safe acquisition of a second, receipt-owned ref.
-				auto* target = get_render_target();
-				ensure(target && target->is_locked());
-				const auto copied_range = m_pending_cell_backing_range;
-				clear_cell_backing_receipt();
-				m_cell_backing_receipt_target.reset(target);
-				m_cell_backing_receipt.publish(copied_range,
-					m_synchronized_content_generation,
-					rsx::cell_access::g_ownership_directory.lifetime_epoch());
-			}
-			m_pending_cell_backing_range.invalidate();
-		}
-
-		const rsx::cell_access::cell_backing_receipt& get_cell_backing_receipt() const noexcept
-		{
-			return m_cell_backing_receipt;
-		}
-
-		vk::render_target* get_cell_backing_receipt_target() const noexcept
-		{
-			return m_cell_backing_receipt_target.get();
-		}
-
-		void clear_cell_backing_receipt() noexcept
-		{
-			m_cell_backing_receipt_target.reset();
-			m_cell_backing_receipt.clear();
-			m_pending_cell_backing_range.invalidate();
-		}
+		{}
 
 		/**
 		 * Misc
@@ -520,7 +515,6 @@ namespace vk
 		atomic_t<bool> m_cache_is_exiting = false;
 
 		void clear();
-		void clear_cell_backing_receipts_unlocked();
 
 		VkComponentMapping apply_component_mapping_flags(u32 gcm_format, rsx::component_order flags, const rsx::texture_channel_remap_t& remap_vector) const;
 
@@ -598,10 +592,5 @@ namespace vk
 		u64 get_temporary_memory_in_use() const;
 
 		bool is_overallocated() const;
-
-		rsx::cell_access::ready_get_result try_read_ready_cell_backing(
-			u32 address, u32 size, void* dst, u64 epoch);
-		void clear_cell_backing_receipts(const utils::address_range32& range);
-		void clear_cell_backing_receipts();
 	};
 }

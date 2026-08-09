@@ -151,8 +151,8 @@ namespace rsx
 	struct surface_content_tracker
 	{
 	private:
-		// Cell ready-backing receipts validate this from a non-RSX thread.
-		// Keep generation publication lock-free and monotonic across that reader.
+		// Cell coherence diagnostics sample this from fault-handling threads.
+		// Keep generation publication lock-free across that reader.
 		atomic_t<u64> m_content_generation{0};
 
 		struct content_write_event

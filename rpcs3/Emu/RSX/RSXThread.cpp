@@ -18,6 +18,7 @@
 
 #include "Emu/System.h"
 #include "Emu/Cell/PPUThread.h"
+#include "Emu/Cell/SPUMfcSlackOracle.h"
 #include "Emu/Cell/timers.hpp"
 #include "Emu/Cell/lv2/sys_event.h"
 #include "Emu/Cell/lv2/sys_time.h"
@@ -874,11 +875,6 @@ namespace rsx
 		coherence_stats::set_enabled(false);
 	}
 
-	cell_access::ready_get_result thread::try_read_ready_cell_backing(u32, u32, void*, u64)
-	{
-		return cell_access::ready_get_result::fallback_no_receipt;
-	}
-
 	void thread::save(utils::serial& ar)
 	{
 		[[maybe_unused]] const s32 version = GET_OR_USE_SERIALIZATION_VERSION(ar.is_writing(), rsx);
@@ -947,7 +943,9 @@ namespace rsx
 		: cpu_thread(0x5555'5555)
 	{
 		coherence_stats::reset();
+		spu_mfc_slack::reset();
 		cell_access::g_ownership_directory.reset_validation();
+		cell_access::g_exact_cohort_oracle.reset();
 		coherence_stats::set_enabled(!!g_cfg.video.debug_overlay);
 
 		g_access_violation_handler = [this](u32 address, bool is_writing, const access_violation_info& info)
@@ -3656,13 +3654,14 @@ namespace rsx
 					return coherence_stats::ticks_to_us(value.ticks, frequency);
 				};
 
-				perf_log.notice("CELLSTAT v=2 tsc_hz=%llu av_ppu_n=%llu av_ppu_us=%llu av_spu_n=%llu av_spu_us=%llu av_other_n=%llu av_other_us=%llu vk_probe_n=%llu vk_probe_us=%llu flush_wait_n=%llu flush_wait_us=%llu gpu_event_wait_n=%llu gpu_event_wait_us=%llu readback_wait_n=%llu readback_wait_us=%llu readback_bytes=%llu spu_ch_wait_n=%llu spu_ch_wait_us=%llu",
+				perf_log.notice("CELLSTAT v=3 tsc_hz=%llu av_ppu_n=%llu av_ppu_us=%llu av_spu_n=%llu av_spu_us=%llu av_other_n=%llu av_other_us=%llu vk_probe_n=%llu vk_probe_us=%llu flush_wait_n=%llu flush_wait_us=%llu flush_consumer_wait_n=%llu flush_consumer_wait_us=%llu gpu_event_wait_n=%llu gpu_event_wait_us=%llu readback_wait_n=%llu readback_wait_us=%llu readback_bytes=%llu spu_ch_wait_n=%llu spu_ch_wait_us=%llu",
 					frequency,
 					stats.renderer_fault_ppu.count, to_us(stats.renderer_fault_ppu),
 					stats.renderer_fault_spu.count, to_us(stats.renderer_fault_spu),
 					stats.renderer_fault_other.count, to_us(stats.renderer_fault_other),
 					stats.vk_fault_probe.count, to_us(stats.vk_fault_probe),
 					stats.vk_flush_wait.count, to_us(stats.vk_flush_wait),
+					stats.vk_flush_consumer_wait.count, to_us(stats.vk_flush_consumer_wait),
 					stats.gpu_event_wait.count, to_us(stats.gpu_event_wait),
 					stats.gpu_readback_wait.count, to_us(stats.gpu_readback_wait),
 					stats.gpu_readback_bytes,
@@ -3670,20 +3669,10 @@ namespace rsx
 
 				const auto ownership = cell_access::g_ownership_directory.validation_snapshot();
 				const auto& recount = ownership.last_recount;
-				perf_log.notice("CELLDIR v=2 read_probe_n=%llu read_handled_n=%llu handled_maybe_n=%llu handled_clear_n=%llu handled_inconclusive_n=%llu unhandled_maybe_n=%llu ready_hit_n=%llu ready_no_renderer_n=%llu ready_epoch_n=%llu ready_nontexture_n=%llu ready_no_sibling_n=%llu ready_exact_owner_n=%llu ready_no_receipt_n=%llu ready_stale_gen_n=%llu ready_ambiguous_n=%llu ready_directory_n=%llu recount_n=%llu recount_mismatch_n=%llu recount_busy_n=%llu recount_us=%llu recount_max_us=%llu underflow_n=%llu overflow_n=%llu abandoned_n=%llu sequence_error_n=%llu seq=%llu sections=%llu expected_refs=%llu observed_refs=%llu missing_refs=%llu excess_refs=%llu expected_granules=%u observed_granules=%u mismatch_granules=%u poisoned_granules=%u global_poison=%u expected_overflow=%u",
+				perf_log.notice("CELLDIR v=1 read_probe_n=%llu read_handled_n=%llu handled_maybe_n=%llu handled_clear_n=%llu handled_inconclusive_n=%llu unhandled_maybe_n=%llu recount_n=%llu recount_mismatch_n=%llu recount_busy_n=%llu recount_us=%llu recount_max_us=%llu underflow_n=%llu overflow_n=%llu abandoned_n=%llu sequence_error_n=%llu seq=%llu sections=%llu expected_refs=%llu observed_refs=%llu missing_refs=%llu excess_refs=%llu expected_granules=%u observed_granules=%u mismatch_granules=%u poisoned_granules=%u global_poison=%u expected_overflow=%u",
 					ownership.read_fault_probes, ownership.read_faults_handled,
 					ownership.handled_maybe_texture, ownership.handled_clear,
 					ownership.handled_inconclusive, ownership.unhandled_maybe_texture,
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::hit_backing_receipt),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_renderer),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_epoch),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_nontexture),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_native_sibling),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_exact_owner),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_no_receipt),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_stale_generation),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_ambiguous_receipt),
-					cell_access::g_ownership_directory.ready_get_result_count(cell_access::ready_get_result::fallback_directory),
 					ownership.recounts, ownership.recounts_with_mismatch,
 					ownership.recount_cache_busy, ownership.recount_total_us,
 					ownership.recount_max_us,
@@ -3694,6 +3683,166 @@ namespace rsx
 					recount.expected_granules, recount.observed_granules,
 					recount.mismatched_granules, recount.poisoned_granules,
 					ownership.globally_poisoned, recount.expected_overflow);
+
+				const auto join = cell_access::g_exact_cohort_oracle.snapshot();
+				perf_log.notice("CELLJOIN_SUM v=1 leaders=%llu same_plan_ranges_followers=%llu different_plan_ranges_followers=%llu cross_page_same_plan_pairs=%llu cross_page_followers_covered_by_leader=%llu revision_drift=%llu materializers=%llu noops=%llu mismatches=%llu abandoned=%llu offloader=%llu exact_complete=%llu exact_complete_readback=%llu exact_complete_leader_readback=%llu exact_complete_cross_page=%llu queue_tail_interval_sum_us=%llu queue_tail_max_us=%llu leader_tail_interval_sum_us=%llu leader_tail_max_us=%llu consumer_wait_n=%llu consumer_wait_us=%llu",
+					join.leaders, join.same_plan_ranges_followers, join.different_plan_ranges_followers,
+					join.cross_page_same_plan_pairs, join.cross_page_followers_covered_by_leader,
+					join.cache_revision_splits, join.materializers_published,
+					join.resolved_noops, join.replan_mismatches, join.abandoned,
+					join.offloader_abandons, join.timing_complete,
+					join.timing_with_any_readback, join.timing_with_leader_readback,
+					join.timing_cross_page_complete,
+					join.queue_tail_us, join.queue_tail_max_us,
+					join.projected_tail_us, join.projected_tail_max_us,
+					stats.vk_flush_consumer_wait.count, to_us(stats.vk_flush_consumer_wait));
+				perf_log.notice("CELLJOIN_DIAG v=1 follower_arrival_sum_us=%llu follower_arrival_max_us=%llu materializer_publish_sum_us=%llu materializer_publish_max_us=%llu followers_at_publish=%llu max_followers_at_publish=%llu first_readback=%llu first_no_readback=%llu leader_readback=%llu leader_no_readback=%llu late_readback=%llu late_no_readback=%llu spu_get_leaders=%llu spu_get_followers=%llu spu_get_posts=%llu spu_get_follower_posts=%llu homogeneous_get=%llu mixed_get=%llu plan_overflow=%llu slot_exhaustion=%llu member_exhaustion=%llu unknown_generation=%llu flush_exclusion=%llu preplan_mutation=%llu invalid_directory=%llu invalid_range=%llu unsupported_backend=%llu multiple_materializers=%llu stale_terminal=%llu incomplete_queue=%llu queue_timestamp_without_post=%llu completion_drops=%llu member_drops=%llu active=%u occupied=%u",
+					join.follower_arrival_us, join.follower_arrival_max_us,
+					join.materializer_publish_latency_us, join.materializer_publish_latency_max_us,
+					join.followers_at_materializer_publish, join.max_followers_at_materializer_publish,
+					join.first_completion_with_readback, join.first_completion_without_readback,
+					join.leader_completion_with_readback, join.leader_completion_without_readback,
+					join.late_completion_with_readback, join.late_completion_without_readback,
+					join.spu_get_leaders, join.spu_get_followers,
+					join.spu_get_queue_posts, join.spu_get_follower_queue_posts,
+					join.homogeneous_spu_get_cohorts, join.mixed_spu_get_cohorts,
+					join.plan_overflow, join.slot_exhaustion, join.member_exhaustion,
+					join.unknown_generation_rejections, join.flush_exclusion_rejections,
+					join.preplan_mutation_rejections, join.invalid_directory_sequence,
+					join.invalid_range_rejections,
+					join.unsupported_backend, join.multiple_materializers,
+					join.stale_completion, join.incomplete_queue_timing,
+					join.queue_timestamp_without_post, join.completion_record_drops,
+					join.member_record_drops, join.active_slots, join.occupied_slots);
+
+				const auto mfc_slack = spu_mfc_slack::get_snapshot();
+				const auto mfc_censored = [&](spu_mfc_slack::censor_reason reason)
+				{
+					return mfc_slack.censored[static_cast<usz>(reason)];
+				};
+				u64 mfc_censored_total = 0;
+				for (usz index = 1; index < mfc_slack.censored.size(); index++)
+				{
+					mfc_censored_total += mfc_slack.censored[index];
+				}
+				const u64 mfc_terminal = mfc_slack.valid + mfc_censored_total;
+				const u64 mfc_live = mfc_slack.candidates >= mfc_terminal
+					? mfc_slack.candidates - mfc_terminal : 0;
+
+				perf_log.notice("MFCSLACK_SUM v=1 candidates=%llu terminal=%llu live=%llu valid=%llu valid_all=%llu valid_any1=%llu update_before_complete=%llu demand_before_complete=%llu update_slack_sum_us=%llu update_slack_max_us=%llu demand_slack_sum_us=%llu demand_slack_max_us=%llu no_outer=%llu non_get=%llu queued=%llu stalled=%llu outer_bf=%llu later_bf=%llu later_same_tag=%llu immediate=%llu any_multi=%llu query_overwrite=%llu missing_publication=%llu query_precedes_complete=%llu unsupported_jit=%llu active_overflow=%llu pending_overflow=%llu lifecycle=%llu deadline=%llu ring_drops=%llu",
+					mfc_slack.candidates, mfc_terminal, mfc_live,
+					mfc_slack.valid, mfc_slack.valid_all, mfc_slack.valid_any_one,
+					mfc_slack.update_before_completion, mfc_slack.demand_before_completion,
+					coherence_stats::ticks_to_us(mfc_slack.completion_to_update_ticks, frequency),
+					coherence_stats::ticks_to_us(mfc_slack.completion_to_update_max_ticks, frequency),
+					coherence_stats::ticks_to_us(mfc_slack.completion_to_demand_ticks, frequency),
+					coherence_stats::ticks_to_us(mfc_slack.completion_to_demand_max_ticks, frequency),
+					mfc_censored(spu_mfc_slack::censor_reason::no_outer_list),
+					mfc_censored(spu_mfc_slack::censor_reason::not_get_list),
+					mfc_censored(spu_mfc_slack::censor_reason::queued_or_resumed),
+					mfc_censored(spu_mfc_slack::censor_reason::list_stall),
+					mfc_censored(spu_mfc_slack::censor_reason::outer_barrier_or_fence),
+					mfc_censored(spu_mfc_slack::censor_reason::later_barrier_or_fence),
+					mfc_censored(spu_mfc_slack::censor_reason::later_same_tag_work),
+					mfc_censored(spu_mfc_slack::censor_reason::immediate_query),
+					mfc_censored(spu_mfc_slack::censor_reason::ambiguous_any),
+					mfc_censored(spu_mfc_slack::censor_reason::query_overwrite),
+					mfc_censored(spu_mfc_slack::censor_reason::missing_publication),
+					mfc_censored(spu_mfc_slack::censor_reason::query_precedes_completion),
+					mfc_censored(spu_mfc_slack::censor_reason::unsupported_optimized_tag_path),
+					mfc_censored(spu_mfc_slack::censor_reason::active_overflow),
+					mfc_censored(spu_mfc_slack::censor_reason::pending_overflow),
+					mfc_censored(spu_mfc_slack::censor_reason::lifecycle_rebind),
+					mfc_censored(spu_mfc_slack::censor_reason::deadline),
+					mfc_slack.ring_drops);
+
+				spu_mfc_slack::result mfc_member{};
+				while (spu_mfc_slack::try_pop_result(mfc_member))
+				{
+					perf_log.notice("MFCSLACK_MEMBER v=1 id=%llu member=%u valid=%u censor=%u spu=%08x exec_gen=%llu tag=%u cmd=%02x list=%08x+%u query_gen=%llu pub_gen=%llu mode=%u mask=%08x published=%08x returned=%08x candidate_tsc=%llu complete_tsc=%llu update_tsc=%llu demand_tsc=%llu publish_tsc=%llu return_tsc=%llu update_slack_us=%llu demand_slack_us=%llu update_before_complete=%u demand_before_complete=%u",
+						mfc_member.key.serial, mfc_member.key.member, mfc_member.valid,
+						static_cast<u32>(mfc_member.censor), mfc_member.spu_id,
+						mfc_member.execution_generation, mfc_member.tag, mfc_member.cmd,
+						mfc_member.list_eal, mfc_member.list_size,
+						mfc_member.query_generation, mfc_member.publication_generation,
+						static_cast<u32>(mfc_member.mode), mfc_member.query_mask,
+						mfc_member.published_bits, mfc_member.returned_bits,
+						mfc_member.candidate_ticks, mfc_member.outer_complete_ticks,
+						mfc_member.query_update_ticks, mfc_member.first_demand_ticks,
+						mfc_member.publication_ticks, mfc_member.return_ticks,
+						coherence_stats::ticks_to_us(mfc_member.completion_to_update_ticks, frequency),
+						coherence_stats::ticks_to_us(mfc_member.completion_to_demand_ticks, frequency),
+						mfc_member.update_before_completion, mfc_member.demand_before_completion);
+				}
+
+				cell_access::exact_cohort_completion cohort{};
+				while (cell_access::g_exact_cohort_oracle.try_pop_completion(cohort))
+				{
+					perf_log.notice("CELLJOIN_COHORT v=1 id=%llu epoch=%llu dir_seq=%llu cache_rev=%llu frame_min=%llu frame_max=%llu leader_fault=%08x-%08x leader_invalidate=%08x-%08x materializer_fault=%08x-%08x materializer_invalidate=%08x-%08x sections=%u members=%u cross_page_members=%u success=%u noop=%u abandoned=%u complete=%u materializer=%u first_readback=%u leader_materialized=%u leader_covers=%u materializer_covers=%u leader_valid=%u leader_readback=%u any_readback=%u spu_get_members=%u queue_posts=%u follower_posts=%u started_us=%llu materializer_d_us=%llu materializer_semantic_us=%llu materializer_done_us=%llu leader_done_us=%llu last_done_us=%llu last_terminal_us=%llu first_readback_d_us=%llu last_readback_d_us=%llu materializer_q_us=%llu leader_q_us=%llu last_q_us=%llu queue_tail_us=%llu leader_queue_tail_us=%llu materializer_final_tail_us=%llu leader_final_tail_us=%llu section0=%llx section_session0=%llu producer0=%llx content0=%llu",
+						cohort.serial, cohort.renderer_epoch, cohort.directory_sequence,
+						cohort.cache_revision, cohort.frame_min, cohort.frame_max,
+						cohort.fault_range.start, cohort.fault_range.end,
+						cohort.invalidate_range.start, cohort.invalidate_range.end,
+						cohort.materializer_fault_range.start, cohort.materializer_fault_range.end,
+						cohort.materializer_invalidate_range.start, cohort.materializer_invalidate_range.end,
+						cohort.section_count, cohort.registrations, cohort.cross_page_members,
+						cohort.successful_members, cohort.resolved_noop_members,
+						cohort.abandoned_members, cohort.complete,
+						cohort.first_done_member, cohort.first_done_had_readback,
+						cohort.proposed_leader_materialized,
+						cohort.proposed_leader_covers_all_faults,
+						cohort.materializer_covers_all_faults,
+						cohort.proposed_leader_valid, cohort.proposed_leader_had_readback,
+						cohort.any_readback, cohort.spu_get_members,
+						cohort.queue_posts, cohort.follower_queue_posts,
+						cohort.started_us, cohort.materializer_data_ready_us,
+						cohort.materializer_semantic_ready_us, cohort.first_done_us,
+						cohort.proposed_leader_done_us, cohort.last_member_done_us,
+						cohort.last_terminal_us, cohort.first_readback_data_ready_us,
+						cohort.last_readback_data_ready_us, cohort.materializer_queue_release_us,
+						cohort.proposed_leader_queue_release_us, cohort.last_queue_release_us,
+						cohort.queue_tail_us, cohort.proposed_leader_queue_tail_us,
+						cohort.materializer_tail_us, cohort.projected_tail_us,
+						cohort.first_section_identity, cohort.first_section_session_generation,
+						cohort.first_producer_identity, cohort.first_content_generation);
+				}
+
+				cell_access::exact_cohort_member_completion join_member{};
+				while (cell_access::g_exact_cohort_oracle.try_pop_member_completion(join_member))
+				{
+					const auto& observation = join_member.observation;
+					perf_log.notice("CELLJOIN_MEMBER v=1 id=%llu member=%u terminal=%u first=%u after_materializer=%u after_leader=%u member_fault=%08x-%08x member_invalidate=%08x-%08x done_us=%llu frame=%llu fault_start_tsc=%llu fault_end_tsc=%llu submission_us=%llu q_us=%llu d_us=%llu u_us=%llu semantic_us=%llu queue_posts=%u flush_wait_start_tsc=%llu flush_wait_end_tsc=%llu flush_wait_n=%u readback_wait_start_tsc=%llu readback_wait_end_tsc=%llu readback_wait_n=%u readback_n=%u readback_bytes=%llu transfer_n=%u flush_sections=%u unprotect_sections=%u discarded_sections=%u copied=%08x-%08x replan_empty=%u cache_unchanged=%u plan_verified=%u completion_verified=%u staged_gen0=%llu origin=%u origin_id=%08x guest_pc=%08x fault_addr=%08x spu_get=%u mfc_valid=%u mfc_contains=%u mfc_spu=%u mfc_src=%u mfc_ea=%08x mfc_size=%u mfc_cmd=%02x mfc_tag=%u mfc_flags=%02x",
+						join_member.serial, join_member.member,
+						static_cast<u32>(join_member.terminal),
+						join_member.first_successful_completion,
+						join_member.after_first_successful_completion,
+						join_member.after_proposed_leader_completion,
+						join_member.fault_range.start, join_member.fault_range.end,
+						join_member.invalidate_range.start, join_member.invalidate_range.end,
+						join_member.done_us, observation.frame,
+						observation.fault_start_ticks, observation.fault_end_ticks,
+						observation.submission_ready_us, observation.queue_ref_removed_us,
+						observation.data_ready_us, observation.unprotect_done_us,
+						observation.semantic_ready_us, observation.queue_posts,
+						observation.flush_wait_start_ticks, observation.flush_wait_end_ticks,
+						observation.flush_wait_count,
+						observation.readback_wait_start_ticks, observation.readback_wait_end_ticks,
+						observation.readback_wait_count, observation.readback_count,
+						observation.readback_bytes, observation.transfer_count,
+						observation.flush_sections, observation.unprotect_sections,
+						observation.discarded_sections, observation.copied_start,
+						observation.copied_end, observation.replan_empty,
+						observation.cache_unchanged, observation.semantic_plan_verified,
+						observation.completion_verified,
+						observation.first_staged_completion_generation,
+						observation.origin, observation.origin_id,
+						observation.origin_guest_pc, observation.fault_address,
+						observation.is_spu_get(), observation.mfc_valid,
+						observation.mfc_contains_fault, observation.mfc_spu_id,
+						observation.mfc_source, observation.mfc_ea,
+						observation.mfc_size, observation.mfc_cmd,
+						observation.mfc_tag, observation.mfc_flags);
+				}
 
 				constexpr usz signature_capacity = 128;
 				std::array<cellfault_signature, signature_capacity> signatures{};
